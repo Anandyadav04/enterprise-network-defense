@@ -1,0 +1,42 @@
+{
+  "mappings": {
+    "properties": {
+      "event_id":             { "type": "keyword" },
+      "timestamp":            { "type": "date" },
+      "src_ip":               { "type": "ip" },
+      "dst_ip":               { "type": "ip" },
+      "src_port":             { "type": "integer" },
+      "dst_port":             { "type": "integer" },
+      "protocol":             { "type": "keyword" },
+      "suricata_signature":   { "type": "text", "fields": { "keyword": { "type": "keyword" } } },
+      "suricata_category":    { "type": "keyword" },
+      "suricata_severity":    { "type": "integer" },
+      "ai_attack_class":      { "type": "keyword" },
+      "ai_confidence":        { "type": "float" },
+      "ti_abuseipdb_score":   { "type": "float" },
+      "ti_otx_pulse_count":   { "type": "integer" },
+      "ti_otx_malicious":     { "type": "boolean" },
+      "ti_composite_score":   { "type": "float" },
+      "ti_country":           { "type": "keyword" },
+      "ti_isp":               { "type": "keyword" },
+      "risk_score":           { "type": "float" },
+      "risk_tier":            { "type": "keyword" },
+      "asset_criticality":    { "type": "float" },
+      "asset_name":           { "type": "keyword" },
+      "behavior_anomaly_score": { "type": "float" },
+      "duration":             { "type": "float" },
+      "packet_count":         { "type": "long" },
+      "byte_count":           { "type": "long" },
+      "fwd_bytes":            { "type": "long" },
+      "bwd_bytes":            { "type": "long" },
+      "iat_mean":             { "type": "float" },
+      "payload_entropy":      { "type": "float" },
+      "dns_query_count":      { "type": "integer" }
+    }
+  },
+  "settings": {
+    "number_of_shards": 1,
+    "number_of_replicas": 0,
+    "refresh_interval": "5s"
+  }
+}

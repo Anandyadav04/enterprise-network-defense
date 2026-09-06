@@ -1,0 +1,6 @@
+"""
+mitigation/playbooks/default_policy.yml
+─────────────────────────────────────────
+Default response policy configuration.
+Modify thresholds and channels here without changing code.
+"""

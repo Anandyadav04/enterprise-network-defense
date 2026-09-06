@@ -1,1 +1,71 @@
-venv
+# ─────────────────────────────────────────────────────────────────
+# .gitignore — Enterprise Network Defense Platform
+# ─────────────────────────────────────────────────────────────────
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.so
+venv/
+env/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Environment
+.env
+*.env.local
+*.env.*.local
+.env.example
+
+# AI Models (large binary files — use Git LFS or separate storage)
+ai/models/*.pt
+ai/models/*.onnx
+ai/models/*.bin
+ai/dataset/cicids2017/*.csv
+ai/dataset/unswnb15/*.csv
+
+# Logs
+*.log
+logs/
+/var/log/
+
+# Docker
+.dockerignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Elasticsearch data
+elk/elasticsearch/data/
+
+# Incident reports (generated at runtime)
+/tmp/incident_*.md
+
+# Jupyter notebooks (if used for exploration)
+.ipynb_checkpoints/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+ai_models_prototype.html
+alerts_prototype.html
+dashboard_prototype.html
+threat_intel_prototype.html
+
+PROJECT_PLAN.md

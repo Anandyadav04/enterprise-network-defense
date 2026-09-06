@@ -1,0 +1,194 @@
+# ─────────────────────────────────────────────────────────────────
+#  AI-Powered Enterprise Network Threat Detection Platform
+#  Full-stack Docker Compose orchestration
+# ─────────────────────────────────────────────────────────────────
+
+networks:
+  security-net:
+    driver: bridge
+
+volumes:
+  es_data:
+  pg_data:
+  kafka_data:
+  zookeeper_data:
+
+services:
+
+  # ── Infrastructure ──────────────────────────────────────────────
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    container_name: zookeeper
+    networks: [security-net]
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper/data
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: kafka
+    networks: [security-net]
+    depends_on: [zookeeper]
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+
+  redis:
+    image: redis:7.2-alpine
+    container_name: redis
+    networks: [security-net]
+    ports:
+      - "6379:6379"
+    command: redis-server --save 60 1 --loglevel warning
+
+  postgresql:
+    image: postgres:16-alpine
+    container_name: postgresql
+    networks: [security-net]
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-netdefense}
+      POSTGRES_USER: ${POSTGRES_USER:-netadmin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+
+  # ── ELK Stack ───────────────────────────────────────────────────
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.0
+    container_name: elasticsearch
+    networks: [security-net]
+    ports:
+      - "9200:9200"
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+
+  logstash:
+    image: docker.elastic.co/logstash/logstash:8.13.0
+    container_name: logstash
+    networks: [security-net]
+    depends_on: [elasticsearch, kafka]
+    volumes:
+      - ./elk/logstash/pipeline.conf:/usr/share/logstash/pipeline/logstash.conf:ro
+      - ./elk/logstash/logstash.yml:/usr/share/logstash/config/logstash.yml:ro
+    environment:
+      LS_JAVA_OPTS: "-Xmx256m -Xms256m"
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.13.0
+    container_name: kibana
+    networks: [security-net]
+    depends_on: [elasticsearch]
+    ports:
+      - "5601:5601"
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+      XPACK_SECURITY_ENABLED: "false"
+
+  # ── Security Platform Services ──────────────────────────────────
+
+  packet-engine:
+    build:
+      context: ./packet_engine
+      dockerfile: Dockerfile
+    container_name: packet-engine
+    depends_on: [redis, kafka]
+    environment:
+      REDIS_HOST: localhost
+      REDIS_PORT: 6379
+      KAFKA_BOOTSTRAP_SERVERS: localhost:29092
+      CAPTURE_INTERFACE: ${CAPTURE_INTERFACE:-eth0}
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    network_mode: host  # Required for raw packet capture
+    volumes:
+      - ./packet_engine:/app
+      - ./packet_engine/suricata/rules:/etc/suricata/rules:ro
+
+  stream-processor:
+    build:
+      context: ./stream_processor
+      dockerfile: Dockerfile
+    container_name: stream-processor
+    networks: [security-net]
+    depends_on: [kafka, redis]
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      REDIS_HOST: redis
+
+  ai-inference:
+    build:
+      context: ./ai
+      dockerfile: Dockerfile
+    container_name: ai-inference
+    networks: [security-net]
+    depends_on: [kafka]
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      MODEL_PATH: /app/models/network_classifier.onnx
+    volumes:
+      - ./ai/models:/app/models:ro
+
+  threat-intel:
+    build:
+      context: ./threat_intel
+      dockerfile: Dockerfile
+    container_name: threat-intel
+    networks: [security-net]
+    depends_on: [kafka, redis]
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      REDIS_HOST: redis
+      ABUSEIPDB_API_KEY: ${ABUSEIPDB_API_KEY}
+      OTX_API_KEY: ${OTX_API_KEY}
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: backend
+    networks: [security-net]
+    depends_on: [postgresql, redis, elasticsearch, kafka]
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgresql:5432/${POSTGRES_DB}
+      REDIS_HOST: redis
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      SECRET_KEY: ${SECRET_KEY:-change-this-in-production}
+    volumes:
+      - ./backend:/app
+
+  mitigation:
+    build:
+      context: ./mitigation
+      dockerfile: Dockerfile
+    container_name: mitigation
+    networks: [security-net]
+    depends_on: [kafka, backend]
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      BACKEND_URL: http://backend:8000
+      PFSENSE_HOST: ${PFSENSE_HOST:-}
+      PFSENSE_API_KEY: ${PFSENSE_API_KEY:-}
+      IPS_ENABLED: ${IPS_ENABLED:-false}
