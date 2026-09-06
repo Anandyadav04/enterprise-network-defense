@@ -10,10 +10,8 @@ Handles:
   - Class imbalance handling via SMOTE or class weights
 
 Dataset Download:
-  CIC-IDS2017: https://www.unb.ca/cic/datasets/ids-2017.html
-  UNSW-NB15:   https://research.unsw.edu.au/projects/unsw-nb15-dataset
-
-Place CSV files in: ai/dataset/cicids2017/ or ai/dataset/unswnb15/
+  CIC-IDS2017: Downloaded directly via HuggingFace `datasets` library
+  (using a well-known community mirror: `rdpahalavan/CIC-IDS2017`)
 """
 
 import logging
@@ -100,19 +98,20 @@ def load_dataset(name: str) -> Tuple[np.ndarray, np.ndarray, List[str]]:
 
 
 def _load_cicids2017() -> Tuple[np.ndarray, np.ndarray, List[str]]:
-    """Load and preprocess CIC-IDS2017 CSV files."""
-    data_dir = DATASET_DIR / "cicids2017"
-    if not data_dir.exists():
-        raise FileNotFoundError(f"CIC-IDS2017 dataset not found at {data_dir}")
+    """Load and preprocess CIC-IDS2017 from Hugging Face."""
+    logger.info("Downloading CIC-IDS2017 from Hugging Face... (This may take a minute)")
+    try:
+        from datasets import load_dataset
+    except ImportError:
+        raise ImportError("Please install the 'datasets' package: pip install datasets")
 
-    dfs = []
-    for csv_file in sorted(data_dir.glob("*.csv")):
-        logger.info("Loading: %s", csv_file.name)
-        df = pd.read_csv(csv_file, low_memory=False)
-        df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
-        dfs.append(df)
-
-    df = pd.concat(dfs, ignore_index=True)
+    # Load only the flow features parquet file to skip downloading 15GB of raw packet bytes!
+    dataset = load_dataset("rdpahalavan/CIC-IDS2017", data_files="Network-Flows/*.parquet", split="train[:10%]")
+    df = dataset.to_pandas()
+    
+    # Normalize column names
+    df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
+    
     return _preprocess(df, label_col="label", label_map=CICIDS_LABEL_MAP, cicids=True)
 
 

@@ -118,7 +118,11 @@ class NetworkClassifier:
         features = self.extract_features(event)
         input_name = self.session.get_inputs()[0].name
         outputs = self.session.run(None, {input_name: features})
-        probs = outputs[0][0]  # Softmax output
+        logits = outputs[0][0]  # Raw logits from PyTorch CrossEntropy model
+        
+        # Apply stable softmax
+        exp_logits = np.exp(logits - np.max(logits))
+        probs = exp_logits / np.sum(exp_logits)
 
         top_idx = int(np.argmax(probs))
         top_prob = float(probs[top_idx])
