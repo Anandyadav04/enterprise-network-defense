@@ -39,9 +39,7 @@ class EveReader:
     Tails Suricata's eve.json and forwards alert events to Kafka.
     Supports both event_type='alert' and 'dns'/'flow' for metadata.
     """
-
-    TRACKED_EVENT_TYPES = {"alert", "dns", "flow", "http"}
-
+    TRACKED_EVENT_TYPES = {"alert", "flow", "dns", "http"}
     def __init__(self, producer: KafkaProducer, eve_path: str = EVE_LOG_PATH):
         self.producer = producer
         self.eve_path = Path(eve_path)

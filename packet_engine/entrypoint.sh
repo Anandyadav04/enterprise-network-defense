@@ -15,6 +15,13 @@ suricata-update
 INTERFACE=${CAPTURE_INTERFACE:-eth0}
 echo "Cleaning up any stale PID files..."
 rm -f /var/run/suricata.pid
+
+# Enable flow, dns, and http event types in eve-log
+echo "Enabling flow, dns, and http logs in Suricata..."
+sed -i 's/# *- flow/- flow/g' /etc/suricata/suricata.yaml
+sed -i 's/# *- dns/- dns/g' /etc/suricata/suricata.yaml
+sed -i 's/# *- http/- http/g' /etc/suricata/suricata.yaml
+
 echo "Starting Suricata on interface $INTERFACE..."
 suricata -D -c /etc/suricata/suricata.yaml -i $INTERFACE
 

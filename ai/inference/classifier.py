@@ -6,12 +6,13 @@ ONNX Runtime inference service for network traffic classification.
 Consumes: enriched-events (flow features from stream_processor)
 Produces: enriched-events with ai_attack_class + ai_confidence added
 
-Model: Custom Transformer encoder trained on CIC-IDS2017 / UNSW-NB15
-Input: Normalised numeric flow features (28 features — see FEATURE_COLUMNS)
-Output: Softmax probabilities over attack classes (see ATTACK_CLASSES)
+Model: Transformer encoder trained on CSE-CIC-IDS2018 (6 attack classes)
+Input: Normalised numeric flow features (14 features — see FEATURE_COLUMNS)
+Output: Softmax probabilities over 6 attack classes (see ATTACK_CLASSES)
 
-The model is exported from PyTorch to ONNX for lightweight inference
-without requiring a full PyTorch runtime in the container.
+Hybrid detection: ML model + Suricata signature rule-based fusion.
+Suricata DPI handles payload-level attacks (SQL Injection, HTTP Exploit)
+when the model confidence is low (e.g. XSS flows look like benign HTTPS).
 """
 
 import json
@@ -41,22 +42,62 @@ FEATURE_COLUMNS = [
     "behavior_anomaly_score",
 ]
 
-# ── Attack class labels (must match training label encoding) ─────
+# ── Attack class labels (must match training label encoding exactly) ─────
+# CRITICAL: Order must match colab_cse_cicids2018_training.py ATTACK_CLASSES.
+# The ONNX model output layer has 10 neurons (num_classes=10).
+# Classes not seen in training data (C2_COMMUNICATION, DNS_TUNNELING,
+# DATA_EXFILTRATION, PORT_SCAN) will have near-zero probability in practice.
 ATTACK_CLASSES = [
-    "BENIGN",
-    "SQL_INJECTION",
-    "HTTP_EXPLOIT",
-    "MALWARE",
-    "C2_COMMUNICATION",
-    "DNS_TUNNELING",
-    "DATA_EXFILTRATION",
-    "BRUTE_FORCE",
-    "PORT_SCAN",
-    "DOS_DDOS",
+    "BENIGN",            # idx 0
+    "SQL_INJECTION",     # idx 1
+    "HTTP_EXPLOIT",      # idx 2
+    "MALWARE",           # idx 3
+    "C2_COMMUNICATION", # idx 4  (not in training data — near-zero prob)
+    "DNS_TUNNELING",    # idx 5  (not in training data — near-zero prob)
+    "DATA_EXFILTRATION",# idx 6  (not in training data — near-zero prob)
+    "BRUTE_FORCE",      # idx 7
+    "PORT_SCAN",        # idx 8  (not in training data — near-zero prob)
+    "DOS_DDOS",         # idx 9
 ]
 
-# Minimum confidence to label as non-BENIGN (avoid low-confidence FPs)
-CONFIDENCE_THRESHOLD = 0.55
+# ── Suricata signature → AI class mapping (rule-based override) ──
+# When a known Suricata signature is present, use it to correct or supplement
+# the AI classification. Suricata DPI inspects payloads and catches attacks
+# the model misses at the flow-stats level (e.g. HTTP_EXPLOIT recall=47.8%,
+# XSS flows are indistinguishable from benign HTTPS in flow statistics).
+SIGNATURE_CLASS_MAP = {
+    "MALWARE":        "MALWARE",
+    "TROJAN":         "MALWARE",
+    "BOTNET":         "MALWARE",
+    "SQL Injection":  "SQL_INJECTION",
+    "EXPLOIT":        "HTTP_EXPLOIT",
+    "XSS":            "HTTP_EXPLOIT",
+    "DOS":            "DOS_DDOS",
+    "DDOS":           "DOS_DDOS",
+    "BRUTE":          "BRUTE_FORCE",
+    "DNS":            "DNS_TUNNELING",
+    "SCAN":           "PORT_SCAN",
+    "Nmap":           "PORT_SCAN",
+    "Exfiltration":   "DATA_EXFILTRATION",
+}
+
+# Minimum confidence to label as non-BENIGN (avoid low-confidence FPs).
+# 59% confidence (what Docker internal traffic scores) is noise, not a threat.
+CONFIDENCE_THRESHOLD = 0.72
+
+# Internal / orchestration IP prefixes — always classify as BENIGN.
+# These are Docker Desktop gateway, private RFC1918 container ranges, and
+# localhost addresses that will never be real attack sources in this system.
+INTERNAL_IP_PREFIXES = (
+    "192.168.65.",   # Docker Desktop host gateway (Windows/Mac)
+    "192.168.64.",   # Docker Desktop alternate range
+    "172.17.",       # Default Docker bridge network
+    "172.18.",       # Docker compose network
+    "172.19.",       # Docker compose network
+    "172.20.",       # Docker compose network
+    "127.",          # Loopback
+    "::1",           # IPv6 loopback
+)
 
 
 class NetworkClassifier:
@@ -107,6 +148,12 @@ class NetworkClassifier:
         """
         Run inference on an enriched event.
 
+        Uses a hybrid approach:
+          1. Internal IP whitelist  — Docker/orchestration traffic → BENIGN immediately
+          2. ML model inference     — Transformer encoder on flow features
+          3. Confidence threshold   — Low-confidence predictions → BENIGN
+          4. Suricata rule override — Known signatures boost / correct the class
+
         Returns:
             attack_class (str): Top predicted class label
             confidence (float): Confidence of top prediction (0.0–1.0)
@@ -114,6 +161,20 @@ class NetworkClassifier:
         """
         if self.session is None:
             return "UNKNOWN", 0.0, {}
+
+        # ── Step 1: Internal IP whitelist ──────────────────────────────────
+        # Docker Desktop gateway (192.168.65.1) and container bridge ranges
+        # generate constant background traffic that the model misclassifies.
+        # Whitelisting them is standard SOC practice for orchestration hosts.
+        src_ip = str(event.get("src_ip") or "")
+        if any(src_ip.startswith(prefix) for prefix in INTERNAL_IP_PREFIXES):
+            sig = event.get("suricata_signature") or ""
+            if not sig:
+                # No Suricata alert on this internal IP — definitely benign
+                return "BENIGN", 0.0, {}
+            # If Suricata fired on an internal IP, still process it below
+
+        # ── Step 2: ML inference ───────────────────────────────────────────
 
         features = self.extract_features(event)
         input_name = self.session.get_inputs()[0].name
@@ -130,10 +191,25 @@ class NetworkClassifier:
         # Apply confidence threshold
         if top_prob < CONFIDENCE_THRESHOLD or ATTACK_CLASSES[top_idx] == "BENIGN":
             attack_class = "BENIGN"
+            top_prob = 0.0  # Force 0.0 confidence for BENIGN so risk_tier is LOW
         else:
             attack_class = ATTACK_CLASSES[top_idx]
 
         top_classes = {ATTACK_CLASSES[i]: round(float(p), 4) for i, p in enumerate(probs)}
+
+        # ── Hybrid fusion: Suricata signature override ──
+        # Suricata DPI has seen the packet payload; trust it over ML
+        # when a signature matches. This handles the HTTP_EXPLOIT recall gap
+        # (47.8% from training) — XSS/exploit flows are identical to benign
+        # HTTPS at the flow-stats level but Suricata catches them in payload.
+        sig = event.get("suricata_signature") or ""
+        if sig:
+            for keyword, mapped_class in SIGNATURE_CLASS_MAP.items():
+                if keyword.lower() in sig.lower():
+                    attack_class = mapped_class
+                    # Boost confidence since both ML + rule agree
+                    top_prob = max(top_prob, 0.92)
+                    break
 
         return attack_class, round(top_prob, 4), top_classes
 

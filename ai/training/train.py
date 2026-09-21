@@ -135,7 +135,7 @@ def train(dataset_name: str, epochs: int, batch_size: int, lr: float) -> None:
         input_names=["features"],
         output_names=["probabilities"],
         dynamic_axes={"features": {0: "batch_size"}},
-        opset_version=14,
+        opset_version=18,
     )
     logger.info("ONNX model exported to %s", MODELS_DIR / "network_classifier.onnx")
 

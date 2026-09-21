@@ -1,5 +1,6 @@
 import json
 import time
+from datetime import datetime
 from kafka import KafkaProducer
 
 def simulate_alert():
@@ -11,7 +12,7 @@ def simulate_alert():
     )
     
     alert = {
-        "timestamp": "2026-08-29T12:25:00.000000+0000",
+        "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000000+0000"),
         "event_type": "alert",
         "src_ip": "185.15.59.224", # Known bad IP
         "src_port": 4444,

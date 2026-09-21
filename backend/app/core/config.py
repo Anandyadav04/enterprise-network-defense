@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     # FastAPI
     DEBUG: bool = False
     SECRET_KEY: str = "change-this-in-production"
-    CORS_ORIGINS: List[str] = ["http://localhost:5601", "http://localhost:3000"]
+    CORS_ORIGINS: List[str] = ["http://localhost:5601", "http://localhost:3000", "http://localhost:5173"]
 
     # PostgreSQL
     DATABASE_URL: str = "postgresql+asyncpg://netadmin:changeme@localhost:5432/netdefense"

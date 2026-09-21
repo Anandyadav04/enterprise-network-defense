@@ -94,7 +94,7 @@ class StreamProcessor:
     def _process_alert(self, alert: dict) -> None:
         """Correlate an alert with flow data and compute anomaly scores."""
         src_ip = alert.get("src_ip", "")
-        dst_ip = alert.get("dst_ip", "")
+        dst_ip = alert.get("dst_ip") or alert.get("dest_ip", "")
 
         # Filter by severity
         severity = alert.get("alert", {}).get("severity", 3) if "alert" in alert else 3

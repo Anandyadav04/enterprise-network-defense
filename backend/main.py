@@ -2,16 +2,24 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
+import asyncio
 from app.api import alerts, events, health, dashboard
 from app.core.config import settings
 from app.core.database import init_db
+from app.services.alert_sync import start_alert_sync_worker
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown lifecycle handler."""
     await init_db()
+    sync_task = asyncio.create_task(start_alert_sync_worker())
     yield
+    sync_task.cancel()
+    try:
+        await sync_task
+    except asyncio.CancelledError:
+        pass
 
 
 app = FastAPI(

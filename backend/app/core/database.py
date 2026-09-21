@@ -18,6 +18,7 @@ class Base(DeclarativeBase):
 
 async def init_db() -> None:
     """Create all tables on startup (dev mode). Use Alembic migrations in production."""
+    import app.models  # Ensure models are imported so Base.metadata has all tables registered
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
