@@ -7,6 +7,28 @@ networks:
   security-net:
     driver: bridge
 
+  # ── Enterprise Virtual Network Subnets ─────────────────────────
+  corporate-lan:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.0.1.0/24
+          gateway: 10.0.1.1
+
+  dmz-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.0.2.0/24
+          gateway: 10.0.2.1
+
+  external-wan:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 198.51.100.0/24
+          gateway: 198.51.100.1
+
 volumes:
   es_data:
   pg_data:
@@ -111,15 +133,20 @@ services:
       dockerfile: Dockerfile
     container_name: packet-engine
     depends_on: [redis, kafka]
+    networks:
+      security-net: {}
+      dmz-net:
+        ipv4_address: 10.0.2.80
+    ports:
+      - "8080:80"
     environment:
-      REDIS_HOST: localhost
+      REDIS_HOST: redis
       REDIS_PORT: 6379
-      KAFKA_BOOTSTRAP_SERVERS: localhost:29092
-      CAPTURE_INTERFACE: ${CAPTURE_INTERFACE:-eth0}
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      CAPTURE_INTERFACE: eth0
     cap_add:
       - NET_ADMIN
       - NET_RAW
-    network_mode: host  # Required for raw packet capture
     volumes:
       - ./packet_engine:/app
       - ./packet_engine/suricata/rules:/etc/suricata/rules:ro
@@ -192,3 +219,56 @@ services:
       PFSENSE_HOST: ${PFSENSE_HOST:-}
       PFSENSE_API_KEY: ${PFSENSE_API_KEY:-}
       IPS_ENABLED: ${IPS_ENABLED:-false}
+
+  # ══════════════════════════════════════════════════════════════════
+  #  ENTERPRISE VIRTUAL NETWORK — 3-Tier Lab Environment
+  # ══════════════════════════════════════════════════════════════════
+
+  # ── DMZ Web Server (Target) ─────────────────────────────────────
+  # Shares packet-engine's network namespace so Suricata can sniff ALL
+  # inbound/outbound web traffic for IDS analysis.
+  enterprise-web-app:
+    build:
+      context: ./enterprise_network/web_app
+      dockerfile: Dockerfile
+    container_name: enterprise-web-app
+    network_mode: service:packet-engine
+    depends_on: [packet-engine]
+    environment:
+      FLASK_ENV: production
+    restart: unless-stopped
+
+  # ── Corporate Client Workstation ────────────────────────────────
+  client-workstation:
+    build:
+      context: ./enterprise_network/client_workstation
+      dockerfile: Dockerfile
+    container_name: client-workstation
+    networks:
+      corporate-lan:
+        ipv4_address: 10.0.1.25
+      dmz-net: {}
+    depends_on: [enterprise-web-app]
+    environment:
+      WEB_APP_URL: http://10.0.2.80
+      MIN_INTERVAL: "3"
+      MAX_INTERVAL: "8"
+    restart: unless-stopped
+
+  # ── External Attacker Workstation (Kali) ────────────────────────
+  kali-attacker:
+    build:
+      context: ./enterprise_network/kali_attacker
+      dockerfile: Dockerfile
+    container_name: kali-attacker
+    networks:
+      external-wan:
+        ipv4_address: 198.51.100.42
+      dmz-net: {}
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    environment:
+      TARGET_HOST: "10.0.2.80"
+      TARGET_IP: "10.0.2.80"
+    restart: unless-stopped

@@ -70,6 +70,7 @@ SIGNATURE_CLASS_MAP = {
     "TROJAN":         "MALWARE",
     "BOTNET":         "MALWARE",
     "SQL Injection":  "SQL_INJECTION",
+    "SQLi":           "SQL_INJECTION",
     "EXPLOIT":        "HTTP_EXPLOIT",
     "XSS":            "HTTP_EXPLOIT",
     "DOS":            "DOS_DDOS",

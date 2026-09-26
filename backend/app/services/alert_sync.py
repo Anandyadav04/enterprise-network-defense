@@ -79,10 +79,19 @@ async def sync_attacks_once(limit: int = 1000) -> int:
 
         new_count = 0
         async with AsyncSessionLocal() as session:
+            hit_event_ids = [
+                h.get("_source", {}).get("event_id") or h.get("_id")
+                for h in hits if (h.get("_source", {}).get("event_id") or h.get("_id"))
+            ]
+            existing_res = await session.execute(
+                select(Alert.event_id).where(Alert.event_id.in_(hit_event_ids))
+            )
+            existing_ids = set(existing_res.scalars().all())
+
             for hit in hits:
                 src = hit.get("_source", {})
                 event_id = src.get("event_id") or hit.get("_id")
-                if not event_id:
+                if not event_id or event_id in existing_ids:
                     continue
 
                 src_ip = src.get("src_ip", "Unknown")

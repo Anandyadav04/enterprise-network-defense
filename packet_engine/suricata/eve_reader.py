@@ -71,8 +71,19 @@ class EveReader:
     def _publish(self, event: dict) -> None:
         """Enrich event with source tag and publish to Kafka."""
         event["source"] = "suricata"
+        ev_type = event.get("event_type", "unknown")
+        src = event.get("src_ip", "?")
+        dst = event.get("dest_ip", "?")
+
+        if ev_type == "alert":
+            sig = event.get("alert", {}).get("signature", "unknown")
+            logger.info("🚨 SURICATA ALERT [%s -> %s]: %s", src, dst, sig)
+        else:
+            logger.debug("Forwarded %s event [%s -> %s] to Kafka", ev_type, src, dst)
+
         self.producer.send(
             KAFKA_TOPIC_RAW_ALERTS,
             key=event.get("src_ip", "unknown").encode(),
             value=json.dumps(event).encode(),
         )
+        self.producer.flush()

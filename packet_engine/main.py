@@ -27,7 +27,7 @@ def wait_for_kafka(bootstrap_servers):
 def main():
     logger.info("Initializing Packet Engine Main Process")
     
-    bootstrap_servers = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:29092")
+    bootstrap_servers = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
     producer = wait_for_kafka(bootstrap_servers)
 
     # Initialize and run the EveReader

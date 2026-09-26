@@ -1,0 +1,33 @@
+# ─────────────────────────────────────────────────────────────────
+#  Enterprise Network Defense — Local Suricata Detection Rules
+# ─────────────────────────────────────────────────────────────────
+
+# ── SQL Injection Rules ──────────────────────────────────────────────
+alert http any any -> any any (msg:"ATTACK [SQLi] - SQL Injection UNION SELECT detected"; flow:to_server; http.uri; content:"UNION"; nocase; content:"SELECT"; nocase; distance:0; classtype:web-application-attack; sid:1000001; rev:1; priority:1;)
+alert http any any -> any any (msg:"ATTACK [SQLi] - SQL Injection Boolean Logic"; flow:to_server; http.uri; pcre:"/('|\%27)\s*OR\s*('|\%27)?(\d+|''|\w+)('|\%27)?\s*=\s*('|\%27)?(\d+|''|\w+)/i"; classtype:web-application-attack; sid:1000002; rev:1; priority:1;)
+alert http any any -> any any (msg:"ATTACK [SQLi] - SQL Injection DROP/ALTER TABLE attempt"; flow:to_server; http.uri; content:"DROP"; nocase; content:"TABLE"; nocase; distance:0; classtype:web-application-attack; sid:1000003; rev:1; priority:1;)
+alert http any any -> any any (msg:"ATTACK [SQLi] - SQL Injection Information Schema query"; flow:to_server; http.uri; content:"information_schema"; nocase; classtype:web-application-attack; sid:1000004; rev:1; priority:1;)
+alert http any any -> any any (msg:"ATTACK [SQLi] - SQL Injection Command Shell execution"; flow:to_server; http.uri; content:"xp_cmdshell"; nocase; classtype:web-application-attack; sid:1000005; rev:1; priority:1;)
+alert http any any -> any any (msg:"ATTACK [SQLi] - SQL Injection Comment Sequence"; flow:to_server; http.uri; content:"--"; classtype:web-application-attack; sid:1000006; rev:1; priority:2;)
+
+# ── Directory Traversal / Exploit Probing ───────────────────────────
+alert http any any -> any any (msg:"ATTACK [Exploit] - Path Traversal /etc/passwd attempt"; flow:to_server; http.uri; content:"etc/passwd"; nocase; classtype:web-application-attack; sid:1000010; rev:1; priority:1;)
+alert http any any -> any any (msg:"ATTACK [Exploit] - Path Traversal /etc/shadow attempt"; flow:to_server; http.uri; content:"etc/shadow"; nocase; classtype:web-application-attack; sid:1000011; rev:1; priority:1;)
+alert http any any -> any any (msg:"ATTACK [Exploit] - Path Traversal Directory Dot-Dot"; flow:to_server; http.uri; content:".."; classtype:web-application-attack; sid:1000012; rev:1; priority:2;)
+alert http any any -> any any (msg:"ATTACK [Exploit] - Path Traversal Windows SAM attempt"; flow:to_server; http.uri; content:"system32"; nocase; classtype:web-application-attack; sid:1000013; rev:1; priority:1;)
+alert http any any -> any any (msg:"ATTACK [Exploit] - Sensitive Admin Endpoint Probe"; flow:to_server; http.uri; pcre:"/\/(admin|backup|config)\//i"; classtype:web-application-attack; sid:1000014; rev:1; priority:3;)
+
+# ── Credential Brute-Force ──────────────────────────────────────────
+alert http any any -> any any (msg:"ATTACK [BruteForce] - Authentication Attempt on /api/login"; flow:to_server; http.method; content:"POST"; http.uri; content:"/api/login"; threshold:type threshold, track by_src, count 5, seconds 30; classtype:attempted-admin; sid:1000020; rev:1; priority:1;)
+
+# ── Malware & C2 Beaconing ──────────────────────────────────────────
+alert http any any -> any any (msg:"ATTACK [Malware/C2] - Trickbot C2 User-Agent Detected"; flow:to_server; http.user_agent; content:"Trickbot"; nocase; classtype:trojan-activity; sid:1000030; rev:1; priority:1;)
+alert http any any -> any any (msg:"ATTACK [Malware/C2] - TrickLoader C2 User-Agent Detected"; flow:to_server; http.user_agent; content:"TrickLoader"; nocase; classtype:trojan-activity; sid:1000031; rev:1; priority:1;)
+alert http any any -> any any (msg:"ATTACK [Malware/C2] - Emotet C2 User-Agent Detected"; flow:to_server; http.user_agent; content:"Emotet"; nocase; classtype:trojan-activity; sid:1000032; rev:1; priority:1;)
+alert http any any -> any any (msg:"ATTACK [Malware/C2] - CobaltStrike Beacon User-Agent Detected"; flow:to_server; http.user_agent; content:"CobaltStrike"; nocase; classtype:trojan-activity; sid:1000033; rev:1; priority:1;)
+alert http any any -> any any (msg:"ATTACK [Malware/C2] - Meterpreter Payload Detected"; flow:to_server; http.user_agent; content:"Meterpreter"; nocase; classtype:trojan-activity; sid:1000034; rev:1; priority:1;)
+alert http any any -> any any (msg:"ATTACK [Malware/C2] - Bot Beacon Header (X-Bot-ID) Detected"; flow:to_server; http.header; content:"X-Bot-ID"; nocase; classtype:trojan-activity; sid:1000035; rev:1; priority:1;)
+alert http any any -> any any (msg:"ATTACK [Malware/C2] - Suspicious C2 Endpoint Accessed"; flow:to_server; http.uri; pcre:"/\/(gate\.php|c2\/checkin|update\/config\.bin|panel\/tasks|bot\/register|api\/beacon)/i"; classtype:trojan-activity; sid:1000036; rev:1; priority:1;)
+
+# ── Reconnaissance ──────────────────────────────────────────────────
+alert http any any -> any any (msg:"ATTACK [Recon] - Suspicious Robots.txt Probe"; flow:to_server; http.uri; content:"/robots.txt"; classtype:web-application-attack; sid:1000040; rev:1; priority:3;)
