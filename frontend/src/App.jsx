@@ -4,6 +4,7 @@ import {
   ResponsiveContainer, Cell, PieChart, Pie
 } from 'recharts'
 import './index.css'
+import MitigationsPage, { blockIpApi, fetchMitigationStats } from './MitigationsPage'
 
 /* ════════════════════════════════════════════════════
    API
@@ -72,6 +73,16 @@ const Icon = {
   Shield: (p) => (
     <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
       <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+    </svg>
+  ),
+  Lock: (p) => (
+    <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="11" width="18" height="11" rx="2" ry="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" />
+    </svg>
+  ),
+  Zap: (p) => (
+    <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
     </svg>
   ),
   Activity: (p) => (
@@ -171,7 +182,7 @@ function StatCard({ label, value, delta, deltaColor, iconBg, icon: IconComp, ico
 /* ════════════════════════════════════════════════════
    DASHBOARD PAGE
    ════════════════════════════════════════════════════ */
-function DashboardPage({ alerts, onMitigate }) {
+function DashboardPage({ alerts, onMitigate, onNavigate, mitigationStats }) {
   const stats = useMemo(() => {
     const total = alerts.length
     const critical = alerts.filter(a => a.risk_tier === 'CRITICAL').length
@@ -320,6 +331,28 @@ function DashboardPage({ alerts, onMitigate }) {
           </div>
         </div>
 
+        {/* ── Active Firewall & IPS Banner ── */}
+        <div className="firewall-status-banner">
+          <div className="firewall-status-info">
+            <span className="firewall-pulse-dot" />
+            <div>
+              <div className="firewall-status-title">
+                Active IPS &amp; Firewall Gateway: pfSense Plus ({mitigationStats?.firewall?.host || '192.168.1.1'})
+              </div>
+              <div className="firewall-status-subtitle">
+                Interface: WAN (em0) &bull; Mode: Stateful Auto-Block &bull; {mitigationStats?.active_blocks ?? 0} Active Block Rules Injected
+              </div>
+            </div>
+          </div>
+          <button 
+            className="btn-primary" 
+            style={{ fontSize: 11, padding: '7px 14px' }}
+            onClick={() => onNavigate && onNavigate('mitigations')}
+          >
+            Manage Firewall Rules &rarr;
+          </button>
+        </div>
+
         {/* ── Recent Alerts mini-table ── */}
         <div className="table-card">
           <div className="table-card-header">
@@ -360,7 +393,7 @@ function DashboardPage({ alerts, onMitigate }) {
                           ✓ Mitigated
                         </span>
                       ) : (
-                        <button className="btn-investigate" style={{ background: a.risk_tier === "CRITICAL" ? 'var(--severity-critical)' : 'rgba(99, 102, 241, 0.2)', color: a.risk_tier === "CRITICAL" ? 'white' : '#818cf8', border: 'none', cursor: 'pointer' }} onClick={() => onMitigate(a.event_id)}>
+                        <button className="btn-investigate" style={{ background: a.risk_tier === "CRITICAL" ? 'var(--severity-critical)' : 'rgba(99, 102, 241, 0.2)', color: a.risk_tier === "CRITICAL" ? 'white' : '#818cf8', border: 'none', cursor: 'pointer' }} onClick={() => onMitigate(a)}>
                           Mitigate
                         </button>
                       )}
@@ -984,7 +1017,7 @@ function AlertsPage({ alerts, onMitigate }) {
                             border: 'none',
                             cursor: 'pointer'
                           }}
-                          onClick={() => onMitigate(a.event_id)}
+                          onClick={() => onMitigate(a)}
                         >
                           Mitigate
                         </button>
@@ -1021,33 +1054,72 @@ export default function App() {
   const [page, setPage] = useState('dashboard')
   const [alerts, setAlerts] = useState([])
   const [criticalCount, setCriticalCount] = useState(0)
+  const [mitigationStats, setMitigationStats] = useState(null)
+  const [toast, setToast] = useState(null)
+
+  const showToast = (msg) => {
+    setToast(msg)
+    setTimeout(() => setToast(null), 4000)
+  }
 
   useEffect(() => {
     const load = async () => {
-      const [a, c] = await Promise.all([
+      const [a, c, m] = await Promise.all([
         fetchAlerts(1000),
-        fetchOpenCriticalCount()
+        fetchOpenCriticalCount(),
+        fetchMitigationStats()
       ]);
       setAlerts(a);
       setCriticalCount(c);
+      if (m) setMitigationStats(m);
     };
     load();
     const id = setInterval(load, 3000)
     return () => clearInterval(id)
   }, [])
 
-  const handleMitigate = async (eventId) => {
+  const handleMitigate = async (alertObj) => {
+    const eventId = typeof alertObj === 'string' ? alertObj : alertObj.event_id
+    const ip = typeof alertObj === 'object' ? alertObj.src_ip : null
+    const threatClass = typeof alertObj === 'object' ? alertObj.ai_attack_class : 'CRITICAL_THREAT'
+    const riskScore = typeof alertObj === 'object' ? alertObj.risk_score : 95.0
+
     // Optimistically update local state immediately
     setAlerts(prev => prev.map(a => a.event_id === eventId ? { ...a, status: 'ACKNOWLEDGED' } : a))
     setCriticalCount(prev => Math.max(0, prev - 1))
+    
+    // 1. Mark alert as acknowledged
     await mitigateAlert(eventId)
+
+    // 2. Inject firewall block rule on pfSense
+    if (ip) {
+      const blockRes = await blockIpApi({
+        ip_address: ip,
+        threat_class: threatClass,
+        risk_score: riskScore,
+        event_id: eventId,
+        duration_minutes: 60,
+        interface: 'WAN',
+        mitigation_mode: 'MANUAL',
+        analyst_notes: `One-click SOC mitigation from Threat Alerts for ${ip}`
+      })
+      if (blockRes) {
+        showToast(`✓ Injected pfSense Block Rule! ${ip} dropped on WAN (60m TTL)`)
+      }
+    } else {
+      showToast('✓ Alert marked as Mitigated')
+    }
+
+    const s = await fetchMitigationStats()
+    if (s) setMitigationStats(s)
   }
 
   const NAV = [
-    { id: 'dashboard', label: 'Dashboard', icon: Icon.Dashboard },
-    { id: 'alerts',    label: 'Threat Alerts', icon: Icon.Shield, badge: criticalCount || null },
-    { id: 'flows',     label: 'Network Flows', icon: Icon.Activity },
-    { id: 'models',    label: 'AI Models', icon: Icon.Cpu },
+    { id: 'dashboard',   label: 'Dashboard',             icon: Icon.Dashboard },
+    { id: 'alerts',      label: 'Threat Alerts',         icon: Icon.Shield, badge: criticalCount || null },
+    { id: 'mitigations', label: 'Active IPS & Firewall', icon: Icon.Lock,   badge: mitigationStats?.active_blocks || null },
+    { id: 'flows',       label: 'Network Flows',         icon: Icon.Activity },
+    { id: 'models',      label: 'AI Models',             icon: Icon.Cpu },
   ]
 
   return (
@@ -1090,11 +1162,27 @@ export default function App() {
 
       {/* ── Main ── */}
       <main className="main-content">
-        {page === 'dashboard' && <DashboardPage alerts={alerts} onMitigate={handleMitigate} />}
+        {page === 'dashboard' && (
+          <DashboardPage
+            alerts={alerts}
+            onMitigate={handleMitigate}
+            onNavigate={setPage}
+            mitigationStats={mitigationStats}
+          />
+        )}
         {page === 'alerts' && <AlertsPage alerts={alerts} onMitigate={handleMitigate} />}
+        {page === 'mitigations' && <MitigationsPage onToast={showToast} />}
         {page === 'flows' && <NetworkFlowsPage alerts={alerts} />}
         {page === 'models' && <AIModelsPage />}
       </main>
+
+      {/* ── Toast Feedback Notification ── */}
+      {toast && (
+        <div className="toast-feedback">
+          <span className="firewall-pulse-dot" />
+          <span>{toast}</span>
+        </div>
+      )}
     </div>
   )
 }

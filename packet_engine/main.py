@@ -4,6 +4,7 @@ import logging
 from kafka import KafkaProducer
 
 from suricata.eve_reader import EveReader
+from firewall_enforcer import start_firewall_enforcer
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("PacketEngine")
@@ -27,6 +28,9 @@ def wait_for_kafka(bootstrap_servers):
 def main():
     logger.info("Initializing Packet Engine Main Process")
     
+    # Start the host-level Linux Netfilter iptables enforcer in background
+    start_firewall_enforcer()
+
     bootstrap_servers = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
     producer = wait_for_kafka(bootstrap_servers)
 

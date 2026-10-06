@@ -42,6 +42,7 @@ SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 SMTP_USER = os.getenv("SMTP_USER", "")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 ALERT_EMAIL = os.getenv("ALERT_EMAIL_RECIPIENT", "")
+BACKEND_URL = os.getenv("BACKEND_URL", "http://backend:8000")
 
 
 class ResponseEngine:
@@ -113,6 +114,24 @@ class ResponseEngine:
             )
             self.ips.block_ip(event.get("src_ip"), duration_minutes=60)
 
+        # Sync with SOC Backend Database & Dashboard
+        try:
+            payload = {
+                "ip_address": event.get("src_ip"),
+                "threat_class": event.get("ai_attack_class", "CRITICAL_ATTACK"),
+                "risk_score": float(event.get("risk_score", 90.0)),
+                "duration_minutes": 60,
+                "interface": "WAN",
+                "event_id": event.get("event_id"),
+                "analyst_notes": f"Autonomous IPS Auto-Block triggered by CRITICAL threat {event.get('ai_attack_class')}",
+                "mitigation_mode": "AUTOMATED",
+            }
+            res = requests.post(f"{BACKEND_URL}/api/v1/mitigation/block", json=payload, timeout=5)
+            if res.ok:
+                logger.info("Mitigation block synced to SOC Backend API: %s", res.json().get("rule_id"))
+        except Exception as exc:
+            logger.warning("Failed to sync mitigation with Backend API: %s", exc)
+
     def _format_alert_body(self, event: dict) -> str:
         return (
             f"Event ID:      {event.get('event_id', 'N/A')}\n"
@@ -166,3 +185,9 @@ class ResponseEngine:
             requests.post(SLACK_WEBHOOK, json={"text": text}, timeout=5)
         except Exception as exc:
             logger.error("Slack notification failed: %s", exc)
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    engine = ResponseEngine()
+    engine.run()
