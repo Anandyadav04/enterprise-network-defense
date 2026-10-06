@@ -12,11 +12,21 @@ iptables DROP rules in real-time when the SOC Dashboard or AI IPS mitigates an I
 
 import os
 import json
+import sys
 import time
 import logging
 import subprocess
 import threading
-import redis
+from typing import Any
+
+_paths_backup = [p for p in sys.path if p in ("/app", ".", "", os.path.dirname(__file__))]
+for p in _paths_backup:
+    sys.path.remove(p)
+try:
+    import redis
+finally:
+    for p in reversed(_paths_backup):
+        sys.path.insert(0, p)
 
 logger = logging.getLogger("HostIPSEnforcer")
 
@@ -74,7 +84,7 @@ def remove_drop_rule(ip: str) -> bool:
     return success
 
 
-def sync_existing_blocks(r: redis.Redis) -> None:
+def sync_existing_blocks(r: Any) -> None:
     """Re-applies any previously active blocks stored in Redis on startup."""
     try:
         active_ips = r.smembers(ACTIVE_BLOCKS_KEY)

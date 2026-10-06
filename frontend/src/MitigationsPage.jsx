@@ -1,59 +1,12 @@
-import { useState, useEffect, useMemo } from 'react'
-
-/* ════════════════════════════════════════════════════
-   API HELPERS
-   ════════════════════════════════════════════════════ */
-const API_BASE = 'http://localhost:8000/api/v1'
-
-export async function fetchMitigationRules(status = 'ALL', search = '') {
-  try {
-    let url = `${API_BASE}/mitigation/rules?status=${status}`
-    if (search) url += `&search=${encodeURIComponent(search)}`
-    const r = await fetch(url)
-    if (!r.ok) return []
-    return await r.json()
-  } catch { return [] }
-}
-
-export async function fetchMitigationStats() {
-  try {
-    const r = await fetch(`${API_BASE}/mitigation/stats`)
-    if (!r.ok) return null
-    return await r.json()
-  } catch { return null }
-}
-
-export async function blockIpApi(payload) {
-  try {
-    const r = await fetch(`${API_BASE}/mitigation/block`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    })
-    if (!r.ok) return null
-    return await r.json()
-  } catch { return null }
-}
-
-export async function unblockIpApi(ipOrRuleId, note = 'Manual unblock via SOC Dashboard') {
-  try {
-    const r = await fetch(`${API_BASE}/mitigation/unblock/${encodeURIComponent(ipOrRuleId)}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ analyst_note: note })
-    })
-    if (!r.ok) return null
-    return await r.json()
-  } catch { return null }
-}
-
-export async function fetchIncidentReport(ruleId) {
-  try {
-    const r = await fetch(`${API_BASE}/mitigation/incident-report/${ruleId}`)
-    if (!r.ok) return null
-    return await r.json()
-  } catch { return null }
-}
+import { useState, useEffect, useMemo, useCallback } from 'react'
+import {
+  fetchMitigationRules,
+  fetchMitigationStats,
+  blockIpApi,
+  unblockIpApi,
+  fetchIncidentReport,
+  isValidIP
+} from './api/client'
 
 function formatIST(utcStr) {
   if (!utcStr) return '—'
@@ -76,8 +29,8 @@ export default function MitigationsPage({ onToast }) {
   const [stats, setStats] = useState(null)
   const [filter, setFilter] = useState('ACTIVE') // ACTIVE | ALL | AUTOMATED | MANUAL
   const [search, setSearch] = useState('')
-  const [loading, setLoading] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const [ipError, setIpError] = useState('')
 
   // Modals state
   const [showBlockModal, setShowBlockModal] = useState(false)
@@ -95,19 +48,52 @@ export default function MitigationsPage({ onToast }) {
     analyst_notes: 'Manual firewall quarantine initiated via SOC console'
   })
 
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     const [r, s] = await Promise.all([
       fetchMitigationRules('ALL', ''),
       fetchMitigationStats()
     ])
     setRules(r)
     setStats(s)
-  }
+  }, [])
 
   useEffect(() => {
-    loadData()
-    const interval = setInterval(loadData, 3000)
-    return () => clearInterval(interval)
+    let isMounted = true
+    const init = async () => {
+      try {
+        const [r, s] = await Promise.all([
+          fetchMitigationRules('ALL', ''),
+          fetchMitigationStats()
+        ])
+        if (isMounted) {
+          setRules(r)
+          setStats(s)
+        }
+      } catch {}
+    }
+    init()
+
+    const interval = setInterval(() => {
+      if (document.hidden) return
+      init()
+    }, 3000)
+
+    return () => {
+      isMounted = false
+      clearInterval(interval)
+    }
+  }, [])
+
+  // Modal keyboard accessibility (close on Escape)
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape') {
+        setShowBlockModal(false)
+        setShowReportModal(false)
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
   }, [])
 
   const filteredRules = useMemo(() => {
@@ -141,10 +127,19 @@ export default function MitigationsPage({ onToast }) {
 
   const handleManualBlockSubmit = async (e) => {
     e.preventDefault()
-    if (!blockForm.ip_address.trim()) return
+    const trimmedIp = blockForm.ip_address.trim()
+    if (!trimmedIp) {
+      setIpError('Offender IP address is required.')
+      return
+    }
+    if (!isValidIP(trimmedIp)) {
+      setIpError('Invalid IP address format. Enter a valid IPv4 (e.g. 192.168.1.150) or IPv6.')
+      return
+    }
+    setIpError('')
     setIsSubmitting(true)
     const payload = {
-      ip_address: blockForm.ip_address.trim(),
+      ip_address: trimmedIp,
       threat_class: blockForm.threat_class,
       risk_score: parseFloat(blockForm.risk_score),
       duration_minutes: parseInt(blockForm.duration_minutes),
@@ -166,6 +161,8 @@ export default function MitigationsPage({ onToast }) {
       })
       if (onToast) onToast(`✓ Firewall rule injected! ${res.ip_address} blocked on pfSense ${res.interface}`)
       loadData()
+    } else {
+      if (onToast) onToast(`⚠️ Failed to inject rule on pfSense. Check gateway connection.`)
     }
   }
 
@@ -191,7 +188,7 @@ export default function MitigationsPage({ onToast }) {
           </p>
         </div>
         <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-          <button className="btn-primary" onClick={() => setShowBlockModal(true)}>
+          <button className="btn-primary" onClick={() => { setIpError(''); setShowBlockModal(true); }}>
             <svg style={{ width: 14, height: 14 }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
             + Manual Block IP
           </button>
@@ -226,7 +223,7 @@ export default function MitigationsPage({ onToast }) {
       </div>
 
       {/* ── KPI Stat Cards ── */}
-      <div className="stats-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginBottom: 24 }}>
+      <div className="stats-grid" style={{ marginBottom: 24 }}>
         <div className="stat-card">
           <div className="stat-card-content">
             <span className="stat-card-label">Active Block Rules</span>
@@ -474,12 +471,20 @@ export default function MitigationsPage({ onToast }) {
                 <div style={{ marginBottom: 14 }}>
                   <label className="form-label">Offender IP Address</label>
                   <input
-                    className="form-input font-mono"
+                    className={`form-input font-mono ${ipError ? 'invalid' : ''}`}
                     placeholder="e.g. 192.168.1.150 or 203.0.113.4"
                     required
                     value={blockForm.ip_address}
-                    onChange={(e) => setBlockForm({ ...blockForm, ip_address: e.target.value })}
+                    onChange={(e) => {
+                      setBlockForm({ ...blockForm, ip_address: e.target.value })
+                      if (ipError) setIpError('')
+                    }}
                   />
+                  {ipError && (
+                    <div className="form-error-msg">
+                      <span>⚠️</span> {ipError}
+                    </div>
+                  )}
                 </div>
 
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 14 }}>
