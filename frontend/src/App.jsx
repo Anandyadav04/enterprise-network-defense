@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useCallback } from 'react'
 import {
   AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip,
   ResponsiveContainer, Cell, PieChart, Pie
@@ -9,11 +9,14 @@ import {
   fetchAlerts,
   fetchOpenCriticalCount,
   mitigateAlert,
+  updateAlertStatusApi,
   fetchMitigationStats,
   blockIpApi,
   fetchFlowEvents,
   exportAlertsToCSV,
-  fetchMitigationRules
+  fetchMitigationRules,
+  MITRE_MAP,
+  playSocAlertSound
 } from './api/client'
 
 /* Format a UTC ISO string to IST (UTC+5:30) */
@@ -152,16 +155,273 @@ function StatCard({ label, value, delta, deltaColor, iconBg, icon: IconComp, ico
 }
 
 /* ════════════════════════════════════════════════════
+   ALERT INVESTIGATION FORENSICS MODAL
+   ════════════════════════════════════════════════════ */
+function AlertInvestigationModal({ alert, onClose, onMitigate, onStatusUpdate, blockedIpSet }) {
+  const [analystNote, setAnalystNote] = useState(alert?.analyst_note || '')
+  const [isUpdating, setIsUpdating] = useState(false)
+  const [copiedId, setCopiedId] = useState(false)
+
+  // Close on Escape
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [onClose])
+
+  if (!alert) return null
+
+  const mitre = MITRE_MAP[alert.ai_attack_class] || {
+    tactic: 'General Threat Activity',
+    tacticId: 'TA0000',
+    id: 'T1000',
+    name: alert.ai_attack_class?.replace(/_/g, ' ') || 'Unknown Vector',
+    desc: 'Unusual network payload signature flagged by Deep Packet Inspection (Suricata).',
+    remediation: 'Review host access controls and block offender IP on perimeter gateway.',
+  }
+
+  const isQuarantined = blockedIpSet?.has(alert.src_ip)
+
+  const handleCopyId = () => {
+    navigator.clipboard?.writeText(alert.event_id)
+    setCopiedId(true)
+    setTimeout(() => setCopiedId(false), 2000)
+  }
+
+  const handleResolve = async (newStatus) => {
+    setIsUpdating(true)
+    await onStatusUpdate(alert.event_id, newStatus, analystNote)
+    setIsUpdating(false)
+    onClose()
+  }
+
+  return (
+    <div className="investigation-modal-backdrop" onClick={onClose}>
+      <div className="investigation-drawer" onClick={(e) => e.stopPropagation()}>
+        {/* Header */}
+        <div className="investigation-header">
+          <div>
+            <div className="investigation-title">
+              <Icon.Shield style={{ width: 18, height: 18, color: '#818cf8' }} />
+              Incident Forensics #{alert.id || alert.event_id?.slice(0, 8)}
+              <SeverityBadge tier={alert.risk_tier} />
+              <span className={`badge ${alert.status === 'ACKNOWLEDGED' ? 'badge-low' : alert.status === 'CLOSED' ? 'badge' : 'badge-critical'}`}>
+                {alert.status}
+              </span>
+            </div>
+            <div className="investigation-subtitle">
+              <span>Event ID: <strong className="font-mono">{alert.event_id}</strong></span>
+              <button
+                className="btn btn-ghost"
+                style={{ padding: '2px 6px', fontSize: 10, display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                onClick={handleCopyId}
+              >
+                {copiedId ? '✓ Copied' : 'Copy ID'}
+              </button>
+              <span>•</span>
+              <span>Detected: {formatIST(alert.timestamp)}</span>
+            </div>
+          </div>
+          <button className="modal-close-btn" onClick={onClose}>&times;</button>
+        </div>
+
+        {/* Body */}
+        <div className="investigation-body">
+          {/* MITRE ATT&CK Card */}
+          <div className="mitre-box">
+            <div className="mitre-header">
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span className="mitre-tag">{mitre.id}</span>
+                <span className="mitre-title">{mitre.name}</span>
+              </div>
+              <span style={{ fontSize: 11, fontWeight: 700, color: '#a78bfa' }}>
+                {mitre.tactic} ({mitre.tacticId})
+              </span>
+            </div>
+            <div className="mitre-desc">{mitre.desc}</div>
+            <div className="mitre-remediation">
+              <strong>SOC Playbook Remediation:</strong> {mitre.remediation}
+            </div>
+          </div>
+
+          {/* Forensic Specs Grid */}
+          <div className="specs-grid">
+            <div className="spec-cell">
+              <div className="spec-label">Attacker (Source IP)</div>
+              <div className="spec-value" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                {alert.src_ip}
+                {isQuarantined && (
+                  <span style={{ fontSize: 9, padding: '1px 5px', borderRadius: 4, background: 'rgba(244,63,94,0.15)', color: '#f43f5e', border: '1px solid rgba(244,63,94,0.3)', fontWeight: 700 }}>
+                    ⊘ QUARANTINED
+                  </span>
+                )}
+              </div>
+            </div>
+
+            <div className="spec-cell">
+              <div className="spec-label">Target (Destination IP)</div>
+              <div className="spec-value">{alert.dst_ip || 'DMZ Web Server (10.0.2.80)'}</div>
+            </div>
+
+            <div className="spec-cell">
+              <div className="spec-label">AI Risk Confidence</div>
+              <div className="spec-value" style={{ color: alert.risk_score >= 90 ? '#f43f5e' : '#f59e0b' }}>
+                {alert.risk_score}% ({alert.risk_tier})
+              </div>
+            </div>
+          </div>
+
+          {/* Suricata DPI Signature */}
+          <div className="spec-cell" style={{ background: 'rgba(0,0,0,0.3)' }}>
+            <div className="spec-label">Suricata DPI Signature Match</div>
+            <div className="spec-value" style={{ color: '#e2e8f0', fontFamily: 'monospace', fontSize: 12 }}>
+              {alert.suricata_signature || 'Generic anomaly detected by transformer flow inference engine'}
+            </div>
+          </div>
+
+          {/* Analyst Investigation Notes */}
+          <div>
+            <label className="form-label" style={{ display: 'flex', justifyContent: 'space-between' }}>
+              <span>Analyst Investigation Notes &amp; Audit Trail</span>
+              <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>Persisted in PostgreSQL</span>
+            </label>
+            <textarea
+              className="form-textarea"
+              rows={3}
+              placeholder="Record forensic observations, IOC verification, or containment notes..."
+              value={analystNote}
+              onChange={(e) => setAnalystNote(e.target.value)}
+            />
+          </div>
+        </div>
+
+        {/* Footer Actions */}
+        <div className="analyst-action-bar">
+          <div style={{ display: 'flex', gap: 8 }}>
+            {alert.src_ip && (
+              isQuarantined ? (
+                <span className="badge badge-low" style={{ background: 'rgba(16,185,129,0.15)', color: '#10b981', border: '1px solid rgba(16,185,129,0.3)', fontSize: 11, padding: '6px 12px' }}>
+                  ✓ Host Quarantined on Firewall
+                </span>
+              ) : (
+                <button
+                  className="btn-block-ip critical"
+                  style={{ padding: '7px 14px' }}
+                  onClick={() => { onMitigate(alert); onClose(); }}
+                >
+                  <svg style={{ width: 12, height: 12 }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
+                  Block IP on Firewall (60m TTL)
+                </button>
+              )
+            )}
+          </div>
+
+          <div style={{ display: 'flex', gap: 8 }}>
+            {alert.status === 'OPEN' && (
+              <button
+                className="btn-neutral-outline"
+                style={{ fontSize: 12, padding: '7px 12px' }}
+                disabled={isUpdating}
+                onClick={() => handleResolve('ACKNOWLEDGED')}
+              >
+                ✓ Mark Acknowledged
+              </button>
+            )}
+            <button
+              className="btn-primary"
+              style={{ fontSize: 12, padding: '7px 14px' }}
+              disabled={isUpdating}
+              onClick={() => handleResolve('CLOSED')}
+            >
+              {isUpdating ? 'Saving…' : 'Save Note & Close Incident'}
+            </button>
+            <button
+              className="btn-ghost"
+              style={{ fontSize: 12, padding: '7px 12px' }}
+              onClick={onClose}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/* ════════════════════════════════════════════════════
    DASHBOARD PAGE
    ════════════════════════════════════════════════════ */
-function DashboardPage({ alerts, onMitigate, onNavigate, mitigationStats, blockedIpSet }) {
+function DashboardPage({ alerts, onMitigate, onNavigate, mitigationStats, blockedIpSet, onSelectAlert, audioEnabled, onToggleAudio }) {
   const stats = useMemo(() => {
     const total = alerts.length
     const critical = alerts.filter(a => a.risk_tier === 'CRITICAL').length
     const high = alerts.filter(a => a.risk_tier === 'HIGH').length
-    const uniqueIPs = new Set(alerts.map(a => a.src_ip)).size
+    const uniqueIPs = new Set(alerts.map(a => a.src_ip).filter(ip => ip && ip !== '—')).size
     return { total, critical, high, uniqueIPs }
   }, [alerts])
+
+  // Top Adversary Malicious Source IPs
+  const topAdversaries = useMemo(() => {
+    const map = {}
+    alerts.forEach(a => {
+      if (!a.src_ip || a.src_ip === '—') return
+      if (!map[a.src_ip]) {
+        map[a.src_ip] = {
+          ip: a.src_ip,
+          count: 0,
+          highestTier: 'LOW',
+          topAttack: a.ai_attack_class || 'UNKNOWN',
+          sampleAlert: a
+        }
+      }
+      map[a.src_ip].count += 1
+      if (a.risk_tier === 'CRITICAL') map[a.src_ip].highestTier = 'CRITICAL'
+      else if (a.risk_tier === 'HIGH' && map[a.src_ip].highestTier !== 'CRITICAL') map[a.src_ip].highestTier = 'HIGH'
+    })
+    return Object.values(map)
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 5)
+  }, [alerts])
+
+  // DEFCON Posture Assessment
+  const posture = useMemo(() => {
+    const openCrit = alerts.filter(a => a.risk_tier === 'CRITICAL' && a.status === 'OPEN').length
+    const totalOffenders = topAdversaries.length || 1
+    const containedOffenders = topAdversaries.filter(adv => blockedIpSet?.has(adv.ip)).length
+    const containmentPct = Math.min(100, Math.round((containedOffenders / totalOffenders) * 100))
+
+    if (openCrit >= 10) {
+      return {
+        level: 'DEFCON 1',
+        cls: 'defcon-1',
+        tagCls: 'crit',
+        title: 'CRITICAL INTRUSION CAMPAIGN ACTIVE',
+        desc: `${openCrit} Unmitigated critical threat payloads detected. Host Netfilter and pfSense perimeter active.`,
+        containmentPct
+      }
+    } else if (openCrit > 0) {
+      return {
+        level: 'DEFCON 2',
+        cls: 'defcon-2',
+        tagCls: 'warn',
+        title: 'ELEVATED THREAT DETECTED — TRIAGE REQUIRED',
+        desc: `${openCrit} Critical alert(s) pending analyst review. Rapid quarantine available.`,
+        containmentPct
+      }
+    } else {
+      return {
+        level: 'DEFCON 5',
+        cls: 'defcon-5',
+        tagCls: 'ok',
+        title: 'PERIMETER DEFENSE SECURE & CONTAINED',
+        desc: `All detected threat incidents acknowledged or blackholed at firewall gateway.`,
+        containmentPct: 100
+      }
+    }
+  }, [alerts, blockedIpSet, topAdversaries])
 
   // Attack class distribution
   const distribution = useMemo(() => {
@@ -200,16 +460,60 @@ function DashboardPage({ alerts, onMitigate, onNavigate, mitigationStats, blocke
 
   return (
     <>
-      <div className="page-header">
-        <h1>Dashboard</h1>
-        <p>Real-time overview of your network security posture</p>
+      <div className="page-header" style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between' }}>
+        <div>
+          <h1>Enterprise SOC Dashboard</h1>
+          <p>Real-time overview of your network security posture and autonomous defense loop</p>
+        </div>
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center', paddingTop: 4 }}>
+          <button
+            className={`btn-soc-audio ${audioEnabled ? 'active' : ''}`}
+            onClick={onToggleAudio}
+            title={audioEnabled ? 'Mute SOC siren sound' : 'Enable audio alarm on critical threats'}
+          >
+            {audioEnabled ? '🔊 Siren: ON' : '🔇 Siren: OFF'}
+          </button>
+        </div>
       </div>
 
       <div className="page-body">
+        {/* ── DEFCON Posture Banner ── */}
+        <div className={`posture-banner ${posture.cls}`}>
+          <div className="posture-left">
+            <span className={`defcon-tag ${posture.tagCls}`}>
+              <span className="pulse-dot" style={{ width: 7, height: 7 }} />
+              {posture.level}
+            </span>
+            <div>
+              <div className="posture-headline">
+                {posture.title}
+              </div>
+              <div className="posture-desc">{posture.desc}</div>
+            </div>
+          </div>
+          <div className="posture-actions">
+            <div style={{ textAlign: 'right', display: 'flex', flexDirection: 'column' }}>
+              <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Adversary Containment</span>
+              <strong style={{ fontSize: 14, color: posture.containmentPct >= 80 ? '#10b981' : '#f59e0b', fontFamily: 'monospace' }}>
+                {posture.containmentPct}% Quarantined
+              </strong>
+            </div>
+            {stats.critical > 0 && (
+              <button
+                className="btn-primary"
+                style={{ fontSize: 11, padding: '7px 12px' }}
+                onClick={() => onNavigate && onNavigate('alerts')}
+              >
+                Triage Threats &rarr;
+              </button>
+            )}
+          </div>
+        </div>
+
         {/* ── Stat Cards ── */}
         <div className="stats-grid">
           <StatCard
-            label="Total Events"
+            label="Total Threat Events"
             value={stats.total}
             delta="Live stream active"
             deltaColor="var(--severity-low)"
@@ -218,10 +522,10 @@ function DashboardPage({ alerts, onMitigate, onNavigate, mitigationStats, blocke
             iconColor="#818cf8"
           />
           <StatCard
-            label="Critical"
+            label="Critical Threats"
             value={stats.critical}
-            delta="Requires investigation"
-            deltaColor="var(--severity-critical)"
+            delta={stats.critical > 0 ? "Requires investigation" : "All clean"}
+            deltaColor={stats.critical > 0 ? "var(--severity-critical)" : "var(--severity-low)"}
             iconBg="rgba(244, 63, 94, 0.1)"
             icon={Icon.AlertTriangle}
             iconColor="#f43f5e"
@@ -236,9 +540,9 @@ function DashboardPage({ alerts, onMitigate, onNavigate, mitigationStats, blocke
             iconColor="#f59e0b"
           />
           <StatCard
-            label="Unique Sources"
+            label="Unique Attackers"
             value={stats.uniqueIPs}
-            delta="Distinct IPs detected"
+            delta={`${mitigationStats?.active_blocks ?? 0} actively blocked`}
             deltaColor="var(--text-muted)"
             iconBg="rgba(56, 189, 248, 0.1)"
             icon={Icon.Globe}
@@ -252,8 +556,8 @@ function DashboardPage({ alerts, onMitigate, onNavigate, mitigationStats, blocke
           <div className="chart-card">
             <div className="chart-card-header">
               <div>
-                <div className="chart-card-title">Alert Timeline</div>
-                <div className="chart-card-subtitle">Events per minute</div>
+                <div className="chart-card-title">Threat Velocity Timeline</div>
+                <div className="chart-card-subtitle">Events per minute in IST</div>
               </div>
               <div className="live-indicator">
                 <span className="pulse-dot" />
@@ -280,8 +584,8 @@ function DashboardPage({ alerts, onMitigate, onNavigate, mitigationStats, blocke
           <div className="chart-card">
             <div className="chart-card-header">
               <div>
-                <div className="chart-card-title">Attack Distribution</div>
-                <div className="chart-card-subtitle">By AI classification</div>
+                <div className="chart-card-title">Attack Class Distribution</div>
+                <div className="chart-card-subtitle">By AI classification engine</div>
               </div>
             </div>
             {distribution.length === 0 ? (
@@ -303,35 +607,130 @@ function DashboardPage({ alerts, onMitigate, onNavigate, mitigationStats, blocke
           </div>
         </div>
 
-        {/* ── Active Firewall & IPS Banner ── */}
-        <div className="firewall-status-banner">
-          <div className="firewall-status-info">
-            <span className="firewall-pulse-dot" />
-            <div>
-              <div className="firewall-status-title">
-                Active IPS &amp; Firewall Gateway: pfSense Plus ({mitigationStats?.firewall?.host || '192.168.1.1'})
+        {/* ── Top Adversaries & Active Firewall Row ── */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 20 }}>
+          {/* Top Adversaries */}
+          <div className="adversary-card">
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
+              <div>
+                <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--text-primary)' }}>Top Threat Adversaries</div>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>Ranked by incident frequency</div>
               </div>
-              <div className="firewall-status-subtitle">
-                Interface: WAN (em0) &bull; Mode: Stateful Auto-Block &bull; {mitigationStats?.active_blocks ?? 0} Active Block Rules Injected
+              <span className="badge" style={{ background: 'rgba(255,255,255,0.06)', fontSize: 11 }}>
+                {topAdversaries.length} Offender Subnets
+              </span>
+            </div>
+
+            {topAdversaries.length === 0 ? (
+              <div style={{ color: 'var(--text-muted)', fontSize: 12, padding: '24px 0', textAlign: 'center' }}>
+                No hostile source IPs identified yet
               </div>
+            ) : (
+              <div>
+                {topAdversaries.map(adv => {
+                  const isBlocked = blockedIpSet?.has(adv.ip)
+                  return (
+                    <div key={adv.ip} className="adversary-row">
+                      <div className="adversary-info">
+                        <span className="adversary-ip">{adv.ip}</span>
+                        {isBlocked ? (
+                          <span style={{ fontSize: 9, padding: '1px 5px', borderRadius: 4, background: 'rgba(244, 63, 94, 0.15)', color: '#f43f5e', fontWeight: 700, border: '1px solid rgba(244, 63, 94, 0.3)' }}>
+                            ⊘ QUARANTINED
+                          </span>
+                        ) : (
+                          <span style={{ fontSize: 9, padding: '1px 5px', borderRadius: 4, background: 'rgba(245, 158, 11, 0.15)', color: '#f59e0b', fontWeight: 700, border: '1px solid rgba(245, 158, 11, 0.3)' }}>
+                            ⚠️ ACTIVE
+                          </span>
+                        )}
+                        <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>
+                          {adv.topAttack.replace(/_/g, ' ')}
+                        </span>
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <span style={{ fontWeight: 700, fontFamily: 'monospace', color: '#818cf8' }}>
+                          {adv.count} hits
+                        </span>
+                        {!isBlocked ? (
+                          <button
+                            className="btn-block-ip critical"
+                            style={{ fontSize: 10, padding: '3px 8px' }}
+                            onClick={() => onMitigate(adv.sampleAlert)}
+                            title={`Drop ${adv.ip} on pfSense firewall`}
+                          >
+                            Block IP
+                          </button>
+                        ) : (
+                          <button
+                            className="btn btn-ghost"
+                            style={{ fontSize: 10, padding: '3px 6px' }}
+                            onClick={() => onSelectAlert && onSelectAlert(adv.sampleAlert)}
+                          >
+                            Inspect
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* Active Firewall & IPS Status */}
+          <div className="table-card" style={{ display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+            <div className="table-card-header">
+              <span className="table-card-title">Firewall &amp; Host IPS State</span>
+              <div className="live-indicator"><span className="pulse-dot" />pfSense Plus</div>
+            </div>
+            <div style={{ padding: '0 20px 20px', flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: 12 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                <span className="firewall-pulse-dot" />
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>
+                    Host Netfilter (iptables) &bull; pfSense WAN ({mitigationStats?.firewall?.host || '192.168.1.1'})
+                  </div>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                    Active Hardware Microsegmentation &bull; Real-time Redis Rule Bus
+                  </div>
+                </div>
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10 }}>
+                <div className="spec-cell">
+                  <div className="spec-label">Active Drop Rules</div>
+                  <div className="spec-value" style={{ color: '#f43f5e' }}>{mitigationStats?.active_blocks ?? 0} rules</div>
+                </div>
+                <div className="spec-cell">
+                  <div className="spec-label">Quarantine TTL</div>
+                  <div className="spec-value">60 Minutes</div>
+                </div>
+                <div className="spec-cell">
+                  <div className="spec-label">Default Policy</div>
+                  <div className="spec-value" style={{ color: '#10b981' }}>Stateful Inspect</div>
+                </div>
+              </div>
+
+              <button
+                className="btn-primary"
+                style={{ fontSize: 12, padding: '8px 16px', alignSelf: 'flex-start', marginTop: 4 }}
+                onClick={() => onNavigate && onNavigate('mitigations')}
+              >
+                Open Firewall Rules Manager &rarr;
+              </button>
             </div>
           </div>
-          <button 
-            className="btn-primary" 
-            style={{ fontSize: 11, padding: '7px 14px' }}
-            onClick={() => onNavigate && onNavigate('mitigations')}
-          >
-            Manage Firewall Rules &rarr;
-          </button>
         </div>
 
         {/* ── Recent Alerts mini-table ── */}
         <div className="table-card">
           <div className="table-card-header">
-            <span className="table-card-title">Recent Alerts</span>
-            <div className="live-indicator">
-              <span className="pulse-dot" />
-              Polling every 3s
+            <span className="table-card-title">Recent Threat Events</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Click row for deep investigation</span>
+              <div className="live-indicator">
+                <span className="pulse-dot" />
+                Polling every 3s
+              </div>
             </div>
           </div>
           <div style={{ overflowX: 'auto', maxHeight: 320 }}>
@@ -340,82 +739,96 @@ function DashboardPage({ alerts, onMitigate, onNavigate, mitigationStats, blocke
                 <tr>
                   <th>Time</th>
                   <th>Severity</th>
-                  <th>Classification</th>
+                  <th>Classification &amp; MITRE</th>
                   <th>Source IP</th>
                   <th>Destination</th>
                   <th style={{ textAlign: 'center' }}>Action</th>
                 </tr>
               </thead>
               <tbody>
-                {alerts.slice(0, 8).map((a) => (
-                  <tr key={a.event_id}>
-                    <td className="font-mono" style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                      {formatIST(a.timestamp)}
-                    </td>
-                    <td><SeverityBadge tier={a.risk_tier} /></td>
-                    <td>
-                      <div className="attack-name">{a.ai_attack_class?.replace(/_/g, ' ')}</div>
-                      {a.suricata_signature && <div className="attack-signature">{a.suricata_signature}</div>}
-                    </td>
-                    <td className="font-mono" style={{ fontSize: 12 }}>
-                      {a.src_ip}
-                      {blockedIpSet?.has(a.src_ip) && (
-                        <span
-                          style={{
-                            marginLeft: 6,
-                            fontSize: 9,
-                            padding: '1px 5px',
-                            borderRadius: 4,
-                            background: 'rgba(244, 63, 94, 0.15)',
-                            color: '#f43f5e',
-                            fontWeight: 700,
-                            border: '1px solid rgba(244, 63, 94, 0.3)'
-                          }}
-                          title="Host is actively dropped by pfSense & Host-IPS"
-                        >
-                          ⊘ QUARANTINED
-                        </span>
-                      )}
-                    </td>
-                    <td className="font-mono" style={{ fontSize: 12, color: 'var(--text-muted)' }}>{a.dst_ip || '—'}</td>
-                    <td style={{ textAlign: 'center' }}>
-                      {a.status === "ACKNOWLEDGED" ? (
-                        blockedIpSet?.has(a.src_ip) ? (
-                          <span className="badge badge-low" style={{ background: 'rgba(16, 185, 129, 0.15)', color: '#10b981', border: '1px solid rgba(16, 185, 129, 0.3)', fontSize: 11, padding: '3px 8px' }}>
-                            ✓ Blocked
+                {alerts.slice(0, 8).map((a) => {
+                  const mitre = MITRE_MAP[a.ai_attack_class]
+                  return (
+                    <tr
+                      key={a.event_id}
+                      className="clickable-row"
+                      onClick={() => onSelectAlert && onSelectAlert(a)}
+                    >
+                      <td className="font-mono" style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                        {formatIST(a.timestamp)}
+                      </td>
+                      <td><SeverityBadge tier={a.risk_tier} /></td>
+                      <td>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <span className="attack-name">{a.ai_attack_class?.replace(/_/g, ' ')}</span>
+                          {mitre && (
+                            <span className="mitre-tag" style={{ fontSize: 9, padding: '1px 5px' }}>
+                              {mitre.id.split(' ')[0]}
+                            </span>
+                          )}
+                        </div>
+                        {a.suricata_signature && <div className="attack-signature">{a.suricata_signature}</div>}
+                      </td>
+                      <td className="font-mono" style={{ fontSize: 12 }}>
+                        {a.src_ip}
+                        {blockedIpSet?.has(a.src_ip) && (
+                          <span
+                            style={{
+                              marginLeft: 6,
+                              fontSize: 9,
+                              padding: '1px 5px',
+                              borderRadius: 4,
+                              background: 'rgba(244, 63, 94, 0.15)',
+                              color: '#f43f5e',
+                              fontWeight: 700,
+                              border: '1px solid rgba(244, 63, 94, 0.3)'
+                            }}
+                            title="Host is actively dropped by pfSense & Host-IPS"
+                          >
+                            ⊘ QUARANTINED
                           </span>
+                        )}
+                      </td>
+                      <td className="font-mono" style={{ fontSize: 12, color: 'var(--text-muted)' }}>{a.dst_ip || '—'}</td>
+                      <td style={{ textAlign: 'center' }} onClick={(e) => e.stopPropagation()}>
+                        {a.status === "ACKNOWLEDGED" ? (
+                          blockedIpSet?.has(a.src_ip) ? (
+                            <span className="badge badge-low" style={{ background: 'rgba(16, 185, 129, 0.15)', color: '#10b981', border: '1px solid rgba(16, 185, 129, 0.3)', fontSize: 11, padding: '3px 8px' }}>
+                              ✓ Blocked
+                            </span>
+                          ) : (
+                            <button
+                              className={`btn-block-ip ${a.risk_tier === "CRITICAL" ? 'critical' : ''}`}
+                              onClick={() => onMitigate(a)}
+                              title={a.src_ip ? `Re-block ${a.src_ip} on pfSense firewall (60m TTL)` : 'Acknowledge threat'}
+                            >
+                              <svg style={{ width: 10, height: 10 }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
+                              {a.src_ip ? 'Block IP' : 'Acknowledge'}
+                            </button>
+                          )
+                        ) : blockedIpSet?.has(a.src_ip) ? (
+                          <button
+                            className="btn-neutral-outline"
+                            style={{ fontSize: 11, padding: '4px 10px', display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                            onClick={() => onMitigate(a)}
+                            title="IP already dropped by firewall. Click to acknowledge event."
+                          >
+                            ✓ Quarantined (Ack)
+                          </button>
                         ) : (
                           <button
                             className={`btn-block-ip ${a.risk_tier === "CRITICAL" ? 'critical' : ''}`}
                             onClick={() => onMitigate(a)}
-                            title={a.src_ip ? `Re-block ${a.src_ip} on pfSense firewall (60m TTL)` : 'Acknowledge threat'}
+                            title={a.src_ip ? `Drop ${a.src_ip} on pfSense firewall (60m TTL)` : 'Acknowledge threat'}
                           >
                             <svg style={{ width: 10, height: 10 }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
                             {a.src_ip ? 'Block IP' : 'Acknowledge'}
                           </button>
-                        )
-                      ) : blockedIpSet?.has(a.src_ip) ? (
-                        <button
-                          className="btn-neutral-outline"
-                          style={{ fontSize: 11, padding: '4px 10px', display: 'inline-flex', alignItems: 'center', gap: 4 }}
-                          onClick={() => onMitigate(a)}
-                          title="IP already dropped by firewall. Click to acknowledge event."
-                        >
-                          ✓ Quarantined (Ack)
-                        </button>
-                      ) : (
-                        <button
-                          className={`btn-block-ip ${a.risk_tier === "CRITICAL" ? 'critical' : ''}`}
-                          onClick={() => onMitigate(a)}
-                          title={a.src_ip ? `Drop ${a.src_ip} on pfSense firewall (60m TTL)` : 'Acknowledge threat'}
-                        >
-                          <svg style={{ width: 10, height: 10 }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
-                          {a.src_ip ? 'Block IP' : 'Acknowledge'}
-                        </button>
-                      )}
-                    </td>
-                  </tr>
-                ))}
+                        )}
+                      </td>
+                    </tr>
+                  )
+                })}
                 {alerts.length === 0 && (
                   <tr><td colSpan={6} style={{ textAlign: 'center', padding: 40, color: 'var(--text-muted)' }}>Waiting for events…</td></tr>
                 )}
@@ -892,14 +1305,34 @@ function AIModelsPage() {
 /* ════════════════════════════════════════════════════
    ALERTS PAGE
    ════════════════════════════════════════════════════ */
-function AlertsPage({ alerts, onMitigate, blockedIpSet }) {
+function AlertsPage({ alerts, onMitigate, blockedIpSet, onSelectAlert }) {
   const [search, setSearch] = useState('')
-  const [statusFilter, setStatusFilter] = useState('ALL') // 'ALL' | 'OPEN' | 'ACKNOWLEDGED'
+  const [statusFilter, setStatusFilter] = useState('ALL') // 'ALL' | 'OPEN' | 'ACKNOWLEDGED' | 'CLOSED'
+  const [severityFilter, setSeverityFilter] = useState('ALL') // 'ALL' | 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW'
+  const [timeFilter, setTimeFilter] = useState('ALL') // 'ALL' | '1h' | '6h' | '24h'
+  const [currentTime, setCurrentTime] = useState(() => Date.now())
+
+  const handleTimeFilter = useCallback((tw) => {
+    setTimeFilter(tw)
+    setCurrentTime(Date.now())
+  }, [])
 
   const filtered = useMemo(() => {
     let list = alerts
     if (statusFilter !== 'ALL') {
       list = list.filter(a => a.status === statusFilter)
+    }
+    if (severityFilter !== 'ALL') {
+      list = list.filter(a => a.risk_tier === severityFilter)
+    }
+    if (timeFilter !== 'ALL') {
+      const hours = timeFilter === '1h' ? 1 : timeFilter === '6h' ? 6 : 24
+      const cutoff = currentTime - hours * 60 * 60 * 1000
+      list = list.filter(a => {
+        if (!a.timestamp) return true
+        const t = new Date(a.timestamp.endsWith('Z') ? a.timestamp : a.timestamp + 'Z').getTime()
+        return isNaN(t) || t >= cutoff
+      })
     }
     if (!search.trim()) return list
     const q = search.toLowerCase()
@@ -909,25 +1342,26 @@ function AlertsPage({ alerts, onMitigate, blockedIpSet }) {
       a.suricata_signature?.toLowerCase().includes(q) ||
       a.risk_tier?.toLowerCase().includes(q)
     )
-  }, [alerts, search, statusFilter])
+  }, [alerts, search, statusFilter, severityFilter, timeFilter, currentTime])
 
   const criticalCount = alerts.filter(a => a.risk_tier === 'CRITICAL' && a.status === 'OPEN').length
   const openCount = alerts.filter(a => a.status === 'OPEN').length
   const mitigatedCount = alerts.filter(a => a.status === 'ACKNOWLEDGED').length
+  const closedCount = alerts.filter(a => a.status === 'CLOSED').length
 
   return (
     <>
       <div className="page-header" style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between' }}>
         <div>
           <h1>Threat Alerts &amp; Incident Records</h1>
-          <p>Durable security threat records persisted in PostgreSQL — strictly separated from benign flow telemetry</p>
+          <p>Durable security threat records persisted in PostgreSQL with MITRE ATT&amp;CK context — click any row for deep forensic inspection</p>
         </div>
         <div style={{ display: 'flex', gap: 10, alignItems: 'center', paddingTop: 4 }}>
           <div className="search-wrapper">
             <Icon.Search />
             <input
               className="search-input"
-              placeholder="Search attacks, IPs, signatures…"
+              placeholder="Search attacks, IPs, signatures, MITRE…"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
             />
@@ -946,52 +1380,118 @@ function AlertsPage({ alerts, onMitigate, blockedIpSet }) {
 
       <div className="page-body">
         <div className="table-card">
-          <div className="table-card-header">
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-              <div style={{ display: 'flex', gap: 6 }}>
-                <button
-                  className="btn btn-ghost"
-                  style={{ padding: '5px 12px', fontSize: 12, fontWeight: 600, background: statusFilter === 'ALL' ? 'rgba(99,102,241,0.2)' : '', color: statusFilter === 'ALL' ? '#818cf8' : 'var(--text-muted)' }}
-                  onClick={() => setStatusFilter('ALL')}
-                >
-                  All Threats ({alerts.length})
-                </button>
-                <button
-                  className="btn btn-ghost"
-                  style={{ padding: '5px 12px', fontSize: 12, fontWeight: 600, background: statusFilter === 'OPEN' ? 'rgba(244,63,94,0.15)' : '', color: statusFilter === 'OPEN' ? '#f43f5e' : 'var(--text-muted)' }}
-                  onClick={() => setStatusFilter('OPEN')}
-                >
-                  Open ({openCount})
-                </button>
-                <button
-                  className="btn btn-ghost"
-                  style={{ padding: '5px 12px', fontSize: 12, fontWeight: 600, background: statusFilter === 'ACKNOWLEDGED' ? 'rgba(16,185,129,0.15)' : '', color: statusFilter === 'ACKNOWLEDGED' ? '#10b981' : 'var(--text-muted)' }}
-                  onClick={() => setStatusFilter('ACKNOWLEDGED')}
-                >
-                  Acknowledged ({mitigatedCount})
-                </button>
+          <div className="table-card-header" style={{ flexDirection: 'column', gap: 12, alignItems: 'stretch' }}>
+            {/* Filter Bar Row 1: Status & Live indicator */}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase' }}>Status:</span>
+                <div style={{ display: 'flex', gap: 4 }}>
+                  {[
+                    ['ALL', `All (${alerts.length})`],
+                    ['OPEN', `Open (${openCount})`],
+                    ['ACKNOWLEDGED', `Acknowledged (${mitigatedCount})`],
+                    ['CLOSED', `Closed (${closedCount})`]
+                  ].map(([st, lbl]) => (
+                    <button
+                      key={st}
+                      className="btn btn-ghost"
+                      style={{
+                        padding: '4px 10px',
+                        fontSize: 11,
+                        fontWeight: 600,
+                        background: statusFilter === st ? 'rgba(99,102,241,0.2)' : '',
+                        color: statusFilter === st ? '#818cf8' : 'var(--text-muted)'
+                      }}
+                      onClick={() => setStatusFilter(st)}
+                    >
+                      {lbl}
+                    </button>
+                  ))}
+                </div>
+
+                {criticalCount > 0 && (
+                  <span className="badge badge-critical" style={{ marginLeft: 6 }}>
+                    <span className="badge-dot" />
+                    {criticalCount} Critical Open
+                  </span>
+                )}
               </div>
 
-              {criticalCount > 0 && (
-                <span className="badge badge-critical">
-                  <span className="badge-dot" />
-                  {criticalCount} Critical Open
-                </span>
-              )}
+              <div className="live-indicator">
+                <span className="pulse-dot" />
+                Live PostgreSQL Threat Store
+              </div>
             </div>
-            <div className="live-indicator">
-              <span className="pulse-dot" />
-              Live Record Store
+
+            {/* Filter Bar Row 2: Severity & Time Range */}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: 10, flexWrap: 'wrap', gap: 10 }}>
+              {/* Severity chips */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase' }}>Severity:</span>
+                {['ALL', 'CRITICAL', 'HIGH', 'MEDIUM', 'LOW'].map(sev => {
+                  const isActive = severityFilter === sev
+                  const colorMap = {
+                    CRITICAL: '#f43f5e',
+                    HIGH: '#f59e0b',
+                    MEDIUM: '#38bdf8',
+                    LOW: '#10b981',
+                    ALL: '#818cf8'
+                  }
+                  return (
+                    <button
+                      key={sev}
+                      className="btn btn-ghost"
+                      style={{
+                        padding: '3px 8px',
+                        fontSize: 10,
+                        fontWeight: 700,
+                        background: isActive ? `${colorMap[sev]}25` : '',
+                        color: isActive ? colorMap[sev] : 'var(--text-muted)',
+                        border: isActive ? `1px solid ${colorMap[sev]}50` : '1px solid transparent'
+                      }}
+                      onClick={() => setSeverityFilter(sev)}
+                    >
+                      {sev}
+                    </button>
+                  )
+                })}
+              </div>
+
+              {/* Time window chips */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase' }}>Window:</span>
+                {[
+                  ['ALL', 'All Time'],
+                  ['1h', 'Last 1h'],
+                  ['6h', 'Last 6h'],
+                  ['24h', 'Last 24h']
+                ].map(([tw, label]) => (
+                  <button
+                    key={tw}
+                    className="btn btn-ghost"
+                    style={{
+                      padding: '3px 8px',
+                      fontSize: 10,
+                      fontWeight: 600,
+                      background: timeFilter === tw ? 'rgba(255,255,255,0.1)' : '',
+                      color: timeFilter === tw ? 'var(--text-primary)' : 'var(--text-muted)'
+                    }}
+                    onClick={() => handleTimeFilter(tw)}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
 
-          <div style={{ overflowY: 'auto', maxHeight: 'calc(100vh - 240px)' }}>
+          <div style={{ overflowY: 'auto', maxHeight: 'calc(100vh - 280px)' }}>
             <table className="data-table">
               <thead>
                 <tr>
                   <th>Timestamp</th>
                   <th>Severity</th>
-                  <th>AI Classification</th>
+                  <th>AI Classification &amp; MITRE</th>
                   <th>Source IP</th>
                   <th>Destination</th>
                   <th>Status</th>
@@ -999,100 +1499,124 @@ function AlertsPage({ alerts, onMitigate, blockedIpSet }) {
                 </tr>
               </thead>
               <tbody>
-                {filtered.map((a) => (
-                  <tr key={a.event_id}>
-                    <td className="font-mono" style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                      {formatIST(a.timestamp)}
-                    </td>
-                    <td><SeverityBadge tier={a.risk_tier} /></td>
-                    <td>
-                      <div className="attack-name">{a.ai_attack_class?.replace(/_/g, ' ')}</div>
-                      {a.suricata_signature && <div className="attack-signature">{a.suricata_signature}</div>}
-                      <div className="attack-confidence">Confidence: <span>{a.risk_score}%</span></div>
-                    </td>
-                    <td className="font-mono" style={{ fontSize: 12 }}>
-                      {a.src_ip}
-                      {blockedIpSet?.has(a.src_ip) && (
-                        <span
-                          style={{
-                            marginLeft: 6,
-                            fontSize: 9,
-                            padding: '1px 5px',
-                            borderRadius: 4,
-                            background: 'rgba(244, 63, 94, 0.15)',
-                            color: '#f43f5e',
-                            fontWeight: 700,
-                            border: '1px solid rgba(244, 63, 94, 0.3)'
-                          }}
-                          title="Host is actively dropped by pfSense & Host-IPS"
-                        >
-                          ⊘ QUARANTINED
-                        </span>
-                      )}
-                    </td>
-                    <td className="font-mono" style={{ fontSize: 12, color: 'var(--text-muted)' }}>{a.dst_ip || '—'}</td>
-                    <td>
-                      {a.status === 'ACKNOWLEDGED' ? (
-                        blockedIpSet?.has(a.src_ip) ? (
-                          <span className="badge badge-low" style={{ background: 'rgba(16, 185, 129, 0.15)', color: '#10b981', border: '1px solid rgba(16, 185, 129, 0.3)', fontSize: 10 }}>
-                            BLOCKED
-                          </span>
-                        ) : (
-                          <span className="badge" style={{ background: 'rgba(99, 102, 241, 0.15)', color: '#818cf8', border: '1px solid rgba(99, 102, 241, 0.3)', fontSize: 10 }}>
-                            ACKNOWLEDGED
-                          </span>
-                        )
-                      ) : a.status === 'CLOSED' ? (
-                        <span className="badge" style={{ background: 'rgba(100, 116, 139, 0.2)', color: '#94a3b8', fontSize: 10 }}>
-                          CLOSED
-                        </span>
-                      ) : (
-                        <span className="badge badge-critical" style={{ fontSize: 10 }}>
-                          OPEN
-                        </span>
-                      )}
-                    </td>
-                    <td style={{ textAlign: 'center' }}>
-                      {a.status === 'ACKNOWLEDGED' ? (
-                        blockedIpSet?.has(a.src_ip) ? (
-                          <span style={{ color: '#10b981', fontSize: 12, fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-                            ✓ Blocked
-                          </span>
-                        ) : (
-                          <button
-                            className={`btn-block-ip ${a.risk_tier === "CRITICAL" ? 'critical' : ''}`}
-                            onClick={() => onMitigate(a)}
-                            title={a.src_ip ? `Re-block ${a.src_ip} on pfSense firewall (60m TTL)` : 'Acknowledge threat'}
+                {filtered.map((a) => {
+                  const mitre = MITRE_MAP[a.ai_attack_class]
+                  return (
+                    <tr
+                      key={a.event_id}
+                      className="clickable-row"
+                      onClick={() => onSelectAlert && onSelectAlert(a)}
+                    >
+                      <td className="font-mono" style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                        {formatIST(a.timestamp)}
+                      </td>
+                      <td><SeverityBadge tier={a.risk_tier} /></td>
+                      <td>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <span className="attack-name">{a.ai_attack_class?.replace(/_/g, ' ')}</span>
+                          {mitre && (
+                            <span className="mitre-tag" style={{ fontSize: 9, padding: '1px 5px' }}>
+                              {mitre.id.split(' ')[0]}
+                            </span>
+                          )}
+                        </div>
+                        {a.suricata_signature && <div className="attack-signature">{a.suricata_signature}</div>}
+                        <div className="attack-confidence">Confidence: <span>{a.risk_score}%</span></div>
+                      </td>
+                      <td className="font-mono" style={{ fontSize: 12 }}>
+                        {a.src_ip}
+                        {blockedIpSet?.has(a.src_ip) && (
+                          <span
+                            style={{
+                              marginLeft: 6,
+                              fontSize: 9,
+                              padding: '1px 5px',
+                              borderRadius: 4,
+                              background: 'rgba(244, 63, 94, 0.15)',
+                              color: '#f43f5e',
+                              fontWeight: 700,
+                              border: '1px solid rgba(244, 63, 94, 0.3)'
+                            }}
+                            title="Host is actively dropped by pfSense & Host-IPS"
                           >
-                            <svg style={{ width: 10, height: 10 }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
-                            {a.src_ip ? 'Block IP' : 'Acknowledge'}
+                            ⊘ QUARANTINED
+                          </span>
+                        )}
+                      </td>
+                      <td className="font-mono" style={{ fontSize: 12, color: 'var(--text-muted)' }}>{a.dst_ip || '—'}</td>
+                      <td>
+                        {a.status === 'ACKNOWLEDGED' ? (
+                          blockedIpSet?.has(a.src_ip) ? (
+                            <span className="badge badge-low" style={{ background: 'rgba(16, 185, 129, 0.15)', color: '#10b981', border: '1px solid rgba(16, 185, 129, 0.3)', fontSize: 10 }}>
+                              BLOCKED
+                            </span>
+                          ) : (
+                            <span className="badge" style={{ background: 'rgba(99, 102, 241, 0.15)', color: '#818cf8', border: '1px solid rgba(99, 102, 241, 0.3)', fontSize: 10 }}>
+                              ACKNOWLEDGED
+                            </span>
+                          )
+                        ) : a.status === 'CLOSED' ? (
+                          <span className="badge" style={{ background: 'rgba(100, 116, 139, 0.2)', color: '#94a3b8', fontSize: 10 }}>
+                            CLOSED
+                          </span>
+                        ) : (
+                          <span className="badge badge-critical" style={{ fontSize: 10 }}>
+                            OPEN
+                          </span>
+                        )}
+                      </td>
+                      <td style={{ textAlign: 'center' }} onClick={(e) => e.stopPropagation()}>
+                        <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                          {a.status === 'ACKNOWLEDGED' ? (
+                            blockedIpSet?.has(a.src_ip) ? (
+                              <span style={{ color: '#10b981', fontSize: 12, fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                                ✓ Blocked
+                              </span>
+                            ) : (
+                              <button
+                                className={`btn-block-ip ${a.risk_tier === "CRITICAL" ? 'critical' : ''}`}
+                                onClick={() => onMitigate(a)}
+                                title={a.src_ip ? `Re-block ${a.src_ip} on pfSense firewall (60m TTL)` : 'Acknowledge threat'}
+                              >
+                                <svg style={{ width: 10, height: 10 }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
+                                {a.src_ip ? 'Block IP' : 'Acknowledge'}
+                              </button>
+                            )
+                          ) : blockedIpSet?.has(a.src_ip) ? (
+                            <button
+                              className="btn-neutral-outline"
+                              style={{ fontSize: 11, padding: '4px 9px', display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                              onClick={() => onMitigate(a)}
+                              title="IP already dropped by firewall. Click to acknowledge event."
+                            >
+                              ✓ Quarantined (Ack)
+                            </button>
+                          ) : (
+                            <button
+                              className={`btn-block-ip ${a.risk_tier === "CRITICAL" ? 'critical' : ''}`}
+                              onClick={() => onMitigate(a)}
+                              title={a.src_ip ? `Drop ${a.src_ip} on pfSense firewall (60m TTL)` : 'Acknowledge threat'}
+                            >
+                              <svg style={{ width: 10, height: 10 }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
+                              {a.src_ip ? 'Block IP' : 'Acknowledge'}
+                            </button>
+                          )}
+                          <button
+                            className="btn btn-ghost"
+                            style={{ padding: '4px 6px', fontSize: 11 }}
+                            onClick={() => onSelectAlert && onSelectAlert(a)}
+                            title="Inspect forensic payload & MITRE mapping"
+                          >
+                            🔍
                           </button>
-                        )
-                      ) : blockedIpSet?.has(a.src_ip) ? (
-                        <button
-                          className="btn-neutral-outline"
-                          style={{ fontSize: 11, padding: '4px 9px', display: 'inline-flex', alignItems: 'center', gap: 4 }}
-                          onClick={() => onMitigate(a)}
-                          title="IP already dropped by firewall. Click to acknowledge event."
-                        >
-                          ✓ Quarantined (Ack)
-                        </button>
-                      ) : (
-                        <button
-                          className={`btn-block-ip ${a.risk_tier === "CRITICAL" ? 'critical' : ''}`}
-                          onClick={() => onMitigate(a)}
-                          title={a.src_ip ? `Drop ${a.src_ip} on pfSense firewall (60m TTL)` : 'Acknowledge threat'}
-                        >
-                          <svg style={{ width: 10, height: 10 }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
-                          {a.src_ip ? 'Block IP' : 'Acknowledge'}
-                        </button>
-                      )}
-                    </td>
-                  </tr>
-                ))}
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                })}
                 {filtered.length === 0 && (
                   <tr><td colSpan={7} style={{ textAlign: 'center', padding: 48, color: 'var(--text-muted)' }}>
-                    {search ? 'No results match your search' : 'No threat records in this category'}
+                    {search ? 'No results match your search filters' : 'No threat records in this category'}
                   </td></tr>
                 )}
               </tbody>
@@ -1123,6 +1647,8 @@ export default function App() {
   const [activeRules, setActiveRules] = useState([])
   const [apiConnected, setApiConnected] = useState(true)
   const [toast, setToast] = useState(null)
+  const [selectedAlert, setSelectedAlert] = useState(null)
+  const [audioEnabled, setAudioEnabled] = useState(false)
 
   const showToast = (msg) => {
     setToast(msg)
@@ -1140,6 +1666,12 @@ export default function App() {
           fetchMitigationRules('ACTIVE')
         ])
         if (!isMounted) return
+        
+        // Audio siren check if new critical alerts arrived
+        if (audioEnabled && c > criticalCount && criticalCount > 0) {
+          playSocAlertSound()
+        }
+
         setAlerts(a)
         setCriticalCount(c)
         if (m) setMitigationStats(m)
@@ -1158,7 +1690,7 @@ export default function App() {
       isMounted = false
       clearInterval(id)
     }
-  }, [])
+  }, [audioEnabled, criticalCount])
 
   const blockedIpSet = useMemo(() => {
     const s = new Set()
@@ -1210,6 +1742,19 @@ export default function App() {
     ])
     if (s) setMitigationStats(s)
     if (Array.isArray(freshRules)) setActiveRules(freshRules)
+  }
+
+  const handleStatusUpdate = async (eventId, newStatus, analystNote) => {
+    setAlerts(prev => prev.map(a => a.event_id === eventId ? { ...a, status: newStatus, analyst_note: analystNote } : a))
+    if (newStatus === 'CLOSED' || newStatus === 'ACKNOWLEDGED') {
+      setCriticalCount(prev => Math.max(0, prev - 1))
+    }
+    const ok = await updateAlertStatusApi(eventId, newStatus, analystNote)
+    if (ok) {
+      showToast(`✓ Incident #${eventId.slice(0, 8)} status updated to ${newStatus}`)
+    } else {
+      showToast(`⚠️ Failed to update incident status`)
+    }
   }
 
   const NAV = [
@@ -1267,6 +1812,14 @@ export default function App() {
             onNavigate={setPage}
             mitigationStats={mitigationStats}
             blockedIpSet={blockedIpSet}
+            onSelectAlert={setSelectedAlert}
+            audioEnabled={audioEnabled}
+            onToggleAudio={() => {
+              const next = !audioEnabled
+              setAudioEnabled(next)
+              if (next) playSocAlertSound()
+              showToast(next ? '🔊 SOC Siren Enabled' : '🔇 SOC Siren Muted')
+            }}
           />
         )}
         {page === 'alerts' && (
@@ -1274,12 +1827,25 @@ export default function App() {
             alerts={alerts}
             onMitigate={handleMitigate}
             blockedIpSet={blockedIpSet}
+            onSelectAlert={setSelectedAlert}
           />
         )}
         {page === 'mitigations' && <MitigationsPage onToast={showToast} />}
         {page === 'flows' && <NetworkFlowsPage />}
         {page === 'models' && <AIModelsPage />}
       </main>
+
+      {/* ── Alert Investigation Modal ── */}
+      {selectedAlert && (
+        <AlertInvestigationModal
+          key={selectedAlert.event_id}
+          alert={selectedAlert}
+          onClose={() => setSelectedAlert(null)}
+          onMitigate={handleMitigate}
+          onStatusUpdate={handleStatusUpdate}
+          blockedIpSet={blockedIpSet}
+        />
+      )}
 
       {/* ── Toast Feedback Notification ── */}
       {toast && (

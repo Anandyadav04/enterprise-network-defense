@@ -56,19 +56,129 @@ export async function fetchOpenCriticalCount() {
   }
 }
 
-export async function mitigateAlert(eventId) {
+export async function updateAlertStatusApi(eventId, status = 'ACKNOWLEDGED', analystNote = null) {
   try {
     const res = await request(`/alerts/${eventId}`, {
       method: 'PATCH',
       body: JSON.stringify({
-        status: 'ACKNOWLEDGED',
-        analyst_note: 'Threat mitigated: IP blocked and incident acknowledged by SOC analyst',
+        status,
+        analyst_note: analystNote,
       }),
     })
     return res.ok
   } catch (err) {
-    console.error('mitigateAlert failed:', err)
+    console.error('updateAlertStatusApi failed:', err)
     return false
+  }
+}
+
+export async function mitigateAlert(eventId) {
+  return await updateAlertStatusApi(
+    eventId,
+    'ACKNOWLEDGED',
+    'Threat mitigated: IP blocked and incident acknowledged by SOC analyst'
+  )
+}
+
+/* ── MITRE ATT&CK Knowledge Base Mapping ── */
+export const MITRE_MAP = {
+  HTTP_EXPLOIT: {
+    tactic: 'Initial Access & Discovery',
+    tacticId: 'TA0001 / TA0007',
+    id: 'T1190 / T1083',
+    name: 'Exploit Public-Facing App / File Discovery',
+    desc: 'Adversary probes web application for path traversal, dot-dot sequences, LFI, and unauthorized administrative endpoints.',
+    remediation: 'Verify Web Application Firewall (WAF) rule signatures, sanitize download parameter inputs, and enforce host Netfilter DROP.',
+  },
+  SQL_INJECTION: {
+    tactic: 'Initial Access & Execution',
+    tacticId: 'TA0001 / TA0002',
+    id: 'T1190 / T1059',
+    name: 'SQL Injection / Command Shell Execution',
+    desc: 'Malicious SQL syntax (UNION SELECT, comment tags, xp_cmdshell) designed to manipulate backend database engine.',
+    remediation: 'Utilize parameterized PreparedStatements, restrict DB user privileges, and quarantine offending IP on perimeter firewall.',
+  },
+  BRUTE_FORCE: {
+    tactic: 'Credential Access',
+    tacticId: 'TA0006',
+    id: 'T1110.001',
+    name: 'Password Guessing / Credential Spray',
+    desc: 'Automated rapid dictionary attack targeting authentication endpoints to compromise user or administrator accounts.',
+    remediation: 'Enforce account lockouts, rate limiting, mandatory MFA, and temporary firewall block for repeated failures.',
+  },
+  MALWARE: {
+    tactic: 'Command & Control',
+    tacticId: 'TA0011',
+    id: 'T1071.001',
+    name: 'Web Protocols / C2 Beaconing',
+    desc: 'Outbound HTTP communication matching Trojan/botnet beacon patterns (Trickbot, Cobalt Strike, Emotet) with bot IDs.',
+    remediation: 'Isolate compromised internal host from DMZ/LAN, terminate outbound C2 socket, and run endpoint EDR scan.',
+  },
+  C2_COMMUNICATION: {
+    tactic: 'Command & Control',
+    tacticId: 'TA0011',
+    id: 'T1071',
+    name: 'Application Layer Protocol',
+    desc: 'Heartbeat signals and payload extraction communications with adversary command and control infrastructure.',
+    remediation: 'Blackhole destination IP on pfSense WAN and sinkhole upstream DNS requests.',
+  },
+  PORT_SCAN: {
+    tactic: 'Reconnaissance',
+    tacticId: 'TA0043',
+    id: 'T1046',
+    name: 'Network Service Discovery',
+    desc: 'Automated SYN/Connect scans probing DMZ port availability and service fingerprints across host ranges.',
+    remediation: 'Enable adaptive IPS port-scan thresholding and silence unneeded external ports.',
+  },
+  DOS_DDOS: {
+    tactic: 'Impact',
+    tacticId: 'TA0040',
+    id: 'T1498.001',
+    name: 'Network Denial of Service (HTTP Flood)',
+    desc: 'Volumetric request flood attempting web server thread exhaustion and application latency spikes.',
+    remediation: 'Deploy SYN cookies, reverse proxy rate limiting, and automated machine-speed IP quarantine.',
+  },
+  DATA_EXFILTRATION: {
+    tactic: 'Exfiltration',
+    tacticId: 'TA0010',
+    id: 'T1048',
+    name: 'Exfiltration Over Alternative Protocol',
+    desc: 'Unusual outbound data volumes departing internal subnets to unauthorized external destinations.',
+    remediation: 'Inspect egress payload sizes and revoke session tokens for offending credentials.',
+  },
+  DNS_TUNNELING: {
+    tactic: 'Command & Control & Exfiltration',
+    tacticId: 'TA0011 / TA0010',
+    id: 'T1071.004',
+    name: 'DNS C2 / Tunneling',
+    desc: 'Data payloads covertly encoded in base64/hex inside recursive DNS subdomains.',
+    remediation: 'Block malicious nameservers, monitor DNS request entropy, and enforce internal resolver policies.',
+  },
+}
+
+/* ── Web Audio API Synthetic SOC Siren / Alert Chime ── */
+export function playSocAlertSound() {
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext
+    if (!AudioCtx) return
+    const ctx = new AudioCtx()
+    if (ctx.state === 'suspended') {
+      ctx.resume()
+    }
+    const osc = ctx.createOscillator()
+    const gain = ctx.createGain()
+    osc.type = 'sine'
+    // Crisp dual-tone SOC beep: 880Hz (A5) ramping to 440Hz (A4)
+    osc.frequency.setValueAtTime(880, ctx.currentTime)
+    osc.frequency.exponentialRampToValueAtTime(440, ctx.currentTime + 0.22)
+    gain.gain.setValueAtTime(0.12, ctx.currentTime)
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.22)
+    osc.connect(gain)
+    gain.connect(ctx.destination)
+    osc.start()
+    osc.stop(ctx.currentTime + 0.22)
+  } catch {
+    // Audio context may be restricted by autoplay policy before first gesture
   }
 }
 
